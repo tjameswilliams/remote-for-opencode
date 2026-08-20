@@ -31,8 +31,8 @@ Two things, both to services you already control:
    are stored — never your prompts, code, or files. Apple's handling of
    your iCloud data is governed by
    [Apple's Privacy Policy](https://www.apple.com/legal/privacy/).
-2. **Your AI provider, via your Mac.** When the agent runs, your Mac's
-   OpenCode installation sends prompts to whichever model provider *you*
+2. **Your AI provider, via your Mac.** When the agent runs, the OpenCode
+   installation on your Mac sends prompts to whichever model provider *you*
    configured, using *your* credentials. Those credentials stay on your
    Mac; the phone never sees them. That exchange is governed by your chosen
    provider's terms, not ours.

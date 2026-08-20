@@ -18,7 +18,7 @@ export interface WebsiteStackProps extends cdk.StackProps {
    * The pre-rename domain (goforopencode.com). Copies shipped before the
    * rename poll its /downloads/appcast.xml forever, so the same
    * distribution keeps answering for it. Requires its hosted zone, and a
-   * prior deploy that already moved `domainName` off it — the old Apex/Www
+   * prior deploy that already moved `domainName` off it; the old Apex/Www
    * records must be gone before the Legacy* ones can claim those names.
    */
   legacyDomainName?: string;

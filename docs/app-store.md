@@ -91,9 +91,16 @@ France also requires a separate declaration for apps distributed there.
       App Information → Name, plus every metadata field that repeats the
       name (subtitle is name-free and survives; description and
       promotional text mention the name and need the edit).
-- [x] Subtitle: "Steer your Mac's coding agent" — the compatibility claim
-      lives in the subtitle and description, where it is descriptive,
-      rather than in the name.
+- [x] Subtitle: "Remote for your coding agent" — changed 2026-08-07 after
+      a 5.2.5 rejection of "Steer your Mac's coding agent": Apple prohibits
+      possessive use of its trademarks, and the subtitle is policed as an
+      extension of the app name. Apple-trademark terms stay out of the
+      subtitle entirely; referential uses ("on your Mac") in the
+      description are fine. In the same pass: "mac" removed from the
+      keyword list (trademarked terms in keywords are their own 2.3.7
+      risk), and a missing space fixed in the description
+      ("remote-for-opencodeunder" → "… under"). Description limit is
+      4,000 characters, not 2,000 — the counter shows *remaining*.
 - [ ] **Confirm export-compliance answer** (see above).
 - [x] **`aps-environment` per configuration** — Debug uses
       `Phone/Phone.entitlements` (development), Release uses
@@ -159,11 +166,26 @@ France also requires a separate declaration for apps distributed there.
       and *not* OSI-approved. Saying "open source" with the licence named
       in the same sentence is honest; saying it alone would be
       open-washing, which this audience notices.
-- [ ] Review-notes text explaining that the app **requires a Mac running
+- [x] Review-notes text explaining that the app **requires a Mac running
       the companion** to do anything. Without a demo path, a reviewer sees
       a pairing screen and nothing else — this is the second most likely
-      rejection after the name. Consider either supplying a demo video, or
-      a review-mode build with a canned transcript.
+      rejection after the name.
+
+      It happened: **2.1 Information Needed**, 2026-08-12, on 1.0 (3).
+      Apple asked for a demo video of the app on a *physical* iOS device,
+      and separately whether the app "is designed to teach, develop, or
+      test executable codes" — the standard 2.5.2 / 4.7 screening
+      question. Paste-ready notes and reply text are in
+      `review-response-2026-08-12.md`; the voiceover script is in
+      `demo-video-script.md`.
+
+      Two things worth carrying forward. The review device was an **iPad
+      Air 11-inch (M3)** — the app is `TARGETED_DEVICE_FAMILY: "1"`, so it
+      ran in iPhone compatibility mode, in a room with no Mac in it.
+      And the video obligation is now **standing**: Apple's wording is that
+      an app reviewable only by video needs an updated video *every*
+      submission. Re-record, or re-confirm the existing link's validity in
+      the Notes field, on each one.
 - [x] **Age rating** — every answer is None/No, giving a calculated **4+**
       (172 countries; AL Brazil, ALL Korea, 00+ Vietnam), with age category
       "Not Applicable". Two answers were checked against the code rather

@@ -1,25 +1,44 @@
 ---
 import Base from "../layouts/Base.astro";
+import GridGlyph from "../components/GridGlyph.astro";
+
+// Step numbers and pictograms on the wordmark's cell grid, so the install
+// path reads in the same voice as the mark.
+const DIGITS = [
+  [".#..", "##..", ".#..", ".#..", "####"],
+  ["####", "...#", "####", "#...", "####"],
+  ["####", "...#", "####", "...#", "####"],
+  ["#..#", "#..#", "####", "...#", "...#"],
+];
+const ART = {
+  terminal: ["#.......", ".#......", "..#.....", ".#......", "#....###"],
+  mark: ["####.####", "#..#.#...", "#..#.#...", "#..#.#...", "####.####"],
+  phone: ["##.##", "#...#", "#...#", "#...#", "#...#", "#...#", "#####"],
+  check: ["......#", ".....#.", "#...#..", ".#.#...", "..#...."],
+};
 ---
 
 <Base
-  title="Remote for OpenCode — steer your Mac's coding agent from your phone"
-  description="Drive the OpenCode coding agent on your Mac from a native iPhone app. Zero network setup, end-to-end encrypted, no servers."
+  title="Remote for OpenCode: control your agents from your phone"
+  ogTitle="Control your OpenCode agents from your phone"
+  description="Your all in one remote control for OpenCode. A native iPhone app connected to your Mac with a single handshake. End-to-end encrypted, no servers, no networking setup."
 >
   <section class="hero">
-    <h1>Your Mac writes the code.<br />Your phone holds the leash.</h1>
+    <h1>Your all in one remote control for OpenCode.<br />Control your agents from your phone.</h1>
     <p class="lede">
-      Remote for OpenCode connects your iPhone to the coding agent running on your
-      own Mac — so you can start work, watch it happen, and approve what it
-      wants to do from anywhere.
+      Remote for OpenCode connects your iPhone to your Mac computer with a
+      single handshake process, no networking magic required. Take all of your
+      OpenCode projects on the go, no more holding your laptop open in the
+      coffee shop line!
     </p>
     <div class="actions">
+      <a class="button" href="https://apps.apple.com/us/app/remote-for-opencode-agents/id6797660779">Download for iPhone</a>
       <a class="button" href="/download">Download for Mac</a>
       <a class="button secondary" href="https://github.com/tjameswilliams/remote-for-opencode">Read the source</a>
     </div>
     <p class="note" style="margin-top: 1rem;">
-      Free and source-available. Requires a Mac and
-      <a href="https://opencode.ai">OpenCode</a>.
+      Free and source-available. No servers, no accounts, no telemetry.
+      Requires a Mac and <a href="https://opencode.ai">OpenCode</a>.
     </p>
   </section>
 
@@ -83,17 +102,17 @@ import Base from "../layouts/Base.astro";
 
   <section class="grid">
     <div class="card">
-      <h3>No networking homework</h3>
-      <p>
-        No VPN, no port forwarding, no IP addresses. Your devices find each
-        other through your own iCloud account and talk directly.
-      </p>
-    </div>
-    <div class="card">
       <h3>No servers, including ours</h3>
       <p>
         Traffic is end-to-end encrypted between your two devices. There is
         nothing in the middle, because there is nothing to be in the middle.
+      </p>
+    </div>
+    <div class="card">
+      <h3>No networking homework</h3>
+      <p>
+        No VPN, no port forwarding, no IP addresses. Your devices find each
+        other through your own iCloud account and talk directly.
       </p>
     </div>
     <div class="card">
@@ -114,7 +133,7 @@ import Base from "../layouts/Base.astro";
       <h3>Review before you sign off</h3>
       <p>
         Every accumulated change, per file, against your last commit or your
-        default branch — the way a reviewer would see it.
+        default branch, the way a reviewer would see it.
       </p>
     </div>
     <div class="card">
@@ -126,21 +145,55 @@ import Base from "../layouts/Base.astro";
     </div>
   </section>
 
-  <section class="prose">
-    <h2>How it works</h2>
-    <p>
-      Install OpenCode and the free Mac companion. Open both apps and confirm
-      the six-digit code they show each other. That's the setup.
-    </p>
-    <p>
-      The companion keeps <code>opencode serve</code> running bound to
-      localhost — it is never exposed to your network — and acts as the only
-      gateway to it. Every connection is authenticated and encrypted before a
-      byte of protocol flows.
-    </p>
-    <p>
-      When you background the app, iOS drops the connection but the agent
-      keeps working. Come back and the turn picks up where it left off.
-    </p>
+  <section class="prose steps-section">
+    <h2>Zero to paired</h2>
+    <p>From nothing installed to steering your agent, in four steps.</p>
+    <ol class="steps">
+      <li>
+        <span class="step-digit"><GridGlyph rows={DIGITS[0]} height={35} label="Step 1" /></span>
+        <div class="step-body">
+          <h3>Install OpenCode</h3>
+          <pre><code>curl -fsSL https://opencode.ai/install | bash</code></pre>
+          <p class="note">Already running <a href="https://opencode.ai">OpenCode</a>? Skip ahead.</p>
+        </div>
+        <span class="step-art"><GridGlyph rows={ART.terminal} height={40} /></span>
+      </li>
+      <li>
+        <span class="step-digit"><GridGlyph rows={DIGITS[1]} height={35} label="Step 2" /></span>
+        <div class="step-body">
+          <h3>Install the Mac companion</h3>
+          <pre><code>brew install --cask tjameswilliams/tap/remote-for-opencode</code></pre>
+          <p class="note">
+            Or <a href="/download">download the .dmg</a>. It keeps
+            <code>opencode serve</code> on localhost, never exposed to your
+            network, and is the only gateway to it.
+          </p>
+        </div>
+        <span class="step-art"><GridGlyph rows={ART.mark} height={40} /></span>
+      </li>
+      <li>
+        <span class="step-digit"><GridGlyph rows={DIGITS[2]} height={35} label="Step 3" /></span>
+        <div class="step-body">
+          <h3>Get the iPhone app</h3>
+          <div class="actions">
+            <a class="button" href="https://apps.apple.com/us/app/remote-for-opencode-agents/id6797660779">Download on the App Store</a>
+          </div>
+          <p class="note">Free. A 1.5 MB download.</p>
+        </div>
+        <span class="step-art"><GridGlyph rows={ART.phone} height={48} /></span>
+      </li>
+      <li>
+        <span class="step-digit"><GridGlyph rows={DIGITS[3]} height={35} label="Step 4" /></span>
+        <div class="step-body">
+          <h3>Confirm the six-digit code</h3>
+          <p>
+            Open both apps; when the codes match, you're paired. No accounts,
+            no network setup. Background the phone app any time: the agent
+            keeps working and the turn picks up when you come back.
+          </p>
+        </div>
+        <span class="step-art"><GridGlyph rows={ART.check} height={32} /></span>
+      </li>
+    </ol>
   </section>
 </Base>

@@ -49,7 +49,7 @@ if [ -f "$DMG" ]; then
     --profile "$PROFILE" \
     --region us-east-1
 else
-  echo "==> No dmg at $DMG — skipping binary (set REMOTE_DMG to override)"
+  echo "==> No dmg at $DMG, skipping binary (set REMOTE_DMG to override)"
 fi
 
 # Sparkle: versioned dmgs, binary deltas, and the signed appcast. Uploaded
@@ -69,7 +69,7 @@ if [ -f "$UPDATES/appcast.xml" ]; then
     --profile "$PROFILE" \
     --region us-east-1
 else
-  echo "==> No appcast at $UPDATES — skipping Sparkle upload"
+  echo "==> No appcast at $UPDATES, skipping Sparkle upload"
 fi
 
 echo "==> Invalidating CloudFront cache"

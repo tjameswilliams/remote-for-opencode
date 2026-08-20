@@ -1,6 +1,6 @@
 /*
  * The app's design system, on the web. Values come from
- * docs/design-spec.md — the same warm neutrals, the same rule that nothing
+ * docs/design-spec.md: the same warm neutrals, the same rule that nothing
  * is a pure grey, the same easeOutQuart curve.
  */
 
@@ -252,7 +252,7 @@ pre code {
 .shots img {
   /* Height-led so the strip reads as a row of phones, and an explicit
      aspect ratio so the row reserves its space before the lazy images
-     arrive — without it they collapse to hairlines until they load. */
+     arrive; without it they collapse to hairlines until they load. */
   height: min(30rem, 70vh);
   width: auto;
   aspect-ratio: 1284 / 2778;
@@ -264,7 +264,7 @@ pre code {
 
 /* Demo videos. Same row-of-phones read as .shots, but each one is a real
    player with a caption. preload="none" in the markup keeps three clips off
-   the wire until someone actually asks for one — the poster carries the
+   the wire until someone actually asks for one; the poster carries the
    still. */
 .demos-section {
   margin-top: 3.5rem;
@@ -293,7 +293,7 @@ pre code {
 }
 .demos video {
   /* Explicit ratio reserves the space before the poster loads, exactly as
-     the screenshot strip does — otherwise the row collapses on first paint. */
+     the screenshot strip does; otherwise the row collapses on first paint. */
   width: var(--demo-w);
   height: auto;
   aspect-ratio: 1206 / 2622;
@@ -325,6 +325,55 @@ pre code {
 }
 .prose li {
   margin-bottom: 0.4rem;
+}
+
+/* The install path: digit and pictogram drawn on the mark's cell grid, body
+   in the middle. The pictogram column collapses on narrow screens; the digit
+   stays, it is the step's anchor. */
+.steps {
+  list-style: none;
+  padding: 0;
+  margin: 2rem 0 0;
+}
+.steps li {
+  display: grid;
+  grid-template-columns: 3.25rem minmax(0, 1fr) auto;
+  gap: 0.5rem 1rem;
+  align-items: start;
+  padding: 1.5rem 0;
+  border-top: 1px solid var(--hairline);
+}
+.steps h3 {
+  margin: 0 0 0.6rem;
+  font-size: 1.05rem;
+}
+.steps .step-body > p {
+  max-width: var(--measure);
+  color: var(--ink-muted);
+  margin: 0;
+}
+.steps .step-body .note {
+  margin: 0.6rem 0 0;
+}
+.steps pre {
+  margin: 0;
+}
+.steps .actions {
+  margin-top: 0;
+}
+.step-digit {
+  color: var(--ink);
+  padding-top: 0.15rem;
+}
+.step-art {
+  color: var(--ink-faint);
+  padding-top: 0.15rem;
+  justify-self: end;
+}
+@media (max-width: 640px) {
+  .step-art {
+    display: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

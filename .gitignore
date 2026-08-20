@@ -65,3 +65,6 @@ website/infra/node_modules/
 website/infra/cdk.out/
 website/infra/outputs.json
 app/OpenCodeGo.xcodeproj/
+
+# python tooling
+__pycache__/

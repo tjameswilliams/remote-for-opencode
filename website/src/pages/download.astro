@@ -3,7 +3,7 @@ import Base from "../layouts/Base.astro";
 ---
 
 <Base
-  title="Download — Remote for OpenCode"
+  title="Download | Remote for OpenCode"
   description="Install the Remote for OpenCode Mac companion via Homebrew or a direct download, then pair your iPhone."
 >
   <section class="hero">
@@ -15,7 +15,7 @@ import Base from "../layouts/Base.astro";
 
   <section class="prose">
     <h2>1. The Mac companion</h2>
-    <p>Homebrew is the easiest route — it keeps itself up to date afterwards.</p>
+    <p>Homebrew is the easiest route: it keeps itself up to date afterwards.</p>
     <pre><code>brew install --cask tjameswilliams/tap/remote-for-opencode</code></pre>
     <p>Or download it directly:</p>
     <div class="actions">
@@ -23,15 +23,18 @@ import Base from "../layouts/Base.astro";
     </div>
     <p class="note" style="margin-top: 1rem;">
       Requires macOS 14 Sonoma or later, and
-      <a href="https://opencode.ai">OpenCode</a> — the companion will tell you
+      <a href="https://opencode.ai">OpenCode</a>. The companion will tell you
       if it can't find it. Signed and notarized by Apple.
     </p>
 
     <h2>2. The iPhone app</h2>
     <p>
-      On the App Store. It does nothing on its own — it needs the companion
+      On the App Store. It does nothing on its own; it needs the companion
       above to talk to.
     </p>
+    <div class="actions">
+      <a class="button" href="https://apps.apple.com/us/app/remote-for-opencode-agents/id6797660779">Download on the App Store</a>
+    </div>
 
     <h2>3. Pair them</h2>
     <ul>
@@ -40,7 +43,7 @@ import Base from "../layouts/Base.astro";
       <li>Confirm both screens show the same six-digit code.</li>
     </ul>
     <p>
-      Both devices need to be signed into the same iCloud account — that is
+      Both devices need to be signed into the same iCloud account; that is
       how they find each other without you configuring anything.
     </p>
   </section>

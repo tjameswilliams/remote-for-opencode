@@ -5,11 +5,11 @@ import { WebsiteStack } from "../lib/website-stack.js";
 const app = new cdk.App();
 
 // The stack id predates the rename to "Remote for OpenCode". It is the
-// CloudFormation identity of the live bucket and distribution — changing it
+// CloudFormation identity of the live bucket and distribution; changing it
 // would destroy and recreate both, stranding the /downloads feed.
 new WebsiteStack(app, "GoForOpenCodeWebsite", {
   // us-east-1: CloudFront requires its ACM certificate there. The concrete
-  // account id comes from the radius profile at synth time — the
+  // account id comes from the radius profile at synth time; the
   // hosted-zone lookup needs it.
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: "us-east-1" },
   // Set once the domain is registered and its hosted zone exists. Until
