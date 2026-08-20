@@ -17,20 +17,30 @@ struct MacCompanionApp: App {
     /// to do.
     ///
     /// Deliberately not started at construction. Sparkle treats an invalid
-    /// `SUPublicEDKey` as a fatal error and kills the app on launch — and
-    /// the key is a placeholder in every build until someone has run
-    /// scripts/setup-signing-key.sh. A development build should run without
-    /// an update channel, not refuse to launch.
+    /// `SUPublicEDKey` as a fatal error and kills the app on launch, so the
+    /// updater only starts once `updatesConfigured` has vetted the build —
+    /// which also keeps Debug builds off the update channel entirely.
     private let updater = SPUStandardUpdaterController(
         startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil
     )
 
     /// Whether this build can actually check for updates. False in
     /// development, which is why the menu item hides rather than lying.
+    ///
+    /// The key check alone stopped being a dev/release signal once the real
+    /// `SUPublicEDKey` was committed to Info.plist: a Debug build from Xcode
+    /// would auto-update over its own DerivedData copy with lldb attached —
+    /// Sparkle's installer then wedges the app mid-termination, and a hung
+    /// menu bar app holding an input grab can freeze the keyboard
+    /// system-wide. Debug builds get no update channel, period.
     private static var updatesConfigured: Bool {
-        guard let key = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String
-        else { return false }
-        return !key.isEmpty && !key.hasPrefix("REPLACE_WITH_")
+        #if DEBUG
+            return false
+        #else
+            guard let key = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String
+            else { return false }
+            return !key.isEmpty && !key.hasPrefix("REPLACE_WITH_")
+        #endif
     }
 
     @MainActor
