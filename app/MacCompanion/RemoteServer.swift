@@ -137,6 +137,10 @@ private final class Connection {
     private var retainCycle: Connection?
     private var clientToken: UUID?
     private var peerCompresses = false
+    /// A live watch, when this connection asked for one. Tied to the
+    /// connection because that is exactly how a client stops watching: it
+    /// hangs up.
+    private var watchTask: Task<Void, Never>?
 
     init(
         _ transport: WireTransport,
@@ -156,6 +160,8 @@ private final class Connection {
         }
         transport.onClosed = { [weak self] _ in
             guard let self else { return }
+            watchTask?.cancel()
+            watchTask = nil
             if let token = clientToken {
                 clientToken = nil
                 ConnectedClients.shared.noteDisconnected(token)
@@ -259,22 +265,18 @@ private final class Connection {
                      e.capabilities = try await adapter.capabilities()
                      return [e] }
         case "projects":
+            answer { [try await Self.projectsEvent(adapter: adapter)] }
+        case "project.add":
             answer {
-                // Known projects (OpenCode's history, recency-sorted) first,
-                // then repos discovered on disk that OpenCode has never
-                // opened — the launcher's "start somewhere new".
-                var projects = try await adapter.projects()
-                let known = Set(projects.map(\.worktree))
-                let discovered = RepoDiscovery.repos()
-                    .filter { !known.contains($0) }
-                    .sorted()
-                    .map { path in
-                        Project(id: "repo:\(path)", worktree: path, known: false)
-                    }
-                projects.append(contentsOf: discovered)
-                var e = Wire.Event(kind: "projects")
-                e.projects = projects
-                return [e]
+                guard let path = request.project else { return [] }
+                try ProjectFolders.add(path)
+                return [try await Self.projectsEvent(adapter: adapter)]
+            }
+        case "project.remove":
+            answer {
+                guard let path = request.project else { return [] }
+                ProjectFolders.remove(path)
+                return [try await Self.projectsEvent(adapter: adapter)]
             }
         case "sessions":
             answer { var e = Wire.Event(kind: "sessions")
@@ -326,6 +328,23 @@ private final class Connection {
             }
         case "prompt":
             servePrompt(request, adapter: adapter)
+        case "watch":
+            // A subscription, not an answer: relay the session's live
+            // events until the client hangs up. No `done` is ever sent on
+            // success — a watch has no natural end.
+            guard let session = request.session, let directory = request.project else {
+                write(Wire.Event(kind: "done"))
+                return
+            }
+            watchTask?.cancel()
+            let provider = self.adapter
+            watchTask = Task { @MainActor [weak self] in
+                await TurnRunner.observe(
+                    sessionID: session, directory: directory, adapter: provider
+                ) { [weak self] event in
+                    self?.write(event)
+                }
+            }
         case "resume":
             serveResume(request)
         case "permission":
@@ -382,6 +401,35 @@ private final class Connection {
             write(e)
             write(Wire.Event(kind: "done"))
         }
+    }
+
+    /// The whole project launcher in one event: known projects (OpenCode's
+    /// history, recency-sorted) first, then folders the user pinned by
+    /// hand, then repos discovered on disk that OpenCode has never opened.
+    /// The same answer serves "projects" and both folder edits, so a
+    /// client's list is always the merged truth, never its own guess.
+    private static func projectsEvent(adapter: OpenCodeAdapter) async throws -> Wire.Event {
+        var projects = try await adapter.projects()
+        var seen = Set(projects.map(\.worktree))
+        // Pinned folders outrank discovery: the user said this one matters.
+        // Once OpenCode opens one it shows up in `known` and the pin goes
+        // quiet, deliberately still stored in case the history is cleared.
+        for path in ProjectFolders.all().sorted() where !seen.contains(path) {
+            seen.insert(path)
+            projects.append(
+                Project(id: "folder:\(path)", worktree: path, known: false, added: true)
+            )
+        }
+        let discovered = RepoDiscovery.repos()
+            .filter { !seen.contains($0) }
+            .sorted()
+            .map { path in
+                Project(id: "repo:\(path)", worktree: path, known: false)
+            }
+        projects.append(contentsOf: discovered)
+        var e = Wire.Event(kind: "projects")
+        e.projects = projects
+        return e
     }
 
     /// The one-shot request shape: compute events, send them, close with
@@ -589,153 +637,254 @@ enum TurnRunner {
             }
             defer { invocation.cancel() }
 
-            // Which message each part belongs to, and whose it is. The part
-            // events don't carry a role, and the user's own message streams
-            // back through the same channel as the agent's — without this,
-            // the prompt appears a second time in the transcript as if the
-            // agent had said it.
-            var roles: [String: String] = [:]
-            // Text accumulated per part from the delta stream, and each
-            // part's type. Reasoning only ever gets two
-            // `message.part.updated` events — one empty at the start and
-            // one complete at the end — so without the deltas the thinking
-            // block sits blank and then snaps to the finished text.
-            // `message.part.delta` is where the tokens actually are.
-            var partText: [String: String] = [:]
-            var partType: [String: String] = [:]
-            // Deltas arrive per token — 125 of them for one DeepSeek
-            // thinking block, measured. Each protocol event carries the
-            // whole accumulated text, so forwarding every one is quadratic
-            // in bytes on a link where bytes are seconds, and LiveTurns
-            // buffers all of them for replay. Ten a second still reads as
-            // live typing; the flush at idle guarantees nothing is lost.
-            var lastEmit: [String: Date] = [:]
-            let minimumInterval: TimeInterval = 0.1
-
-            func emitPart(_ partID: String, force: Bool) {
-                guard let kind = partType[partID],
-                      kind == "reasoning" || kind == "text",
-                      let text = partText[partID], !text.isEmpty
-                else { return }
-                if !force, let last = lastEmit[partID],
-                   Date().timeIntervalSince(last) < minimumInterval { return }
-                lastEmit[partID] = Date()
-                var e = Wire.Event(kind: "part")
-                e.part = TurnPart(type: kind, id: partID, text: text)
-                e.session = sessionID
-                emit(e)
+            switch try await pump(
+                events, sessionID: sessionID, directory: directory, adapter: adapter,
+                failure: failure, stopAtIdle: true, emit: emit
+            ) {
+            case .idle, .failed:
+                // Terminal events already emitted inside the pump.
+                return
+            case .streamEnded:
+                // The SSE stream ended without an idle — OpenCode went away.
+                fail("Lost OpenCode's event stream on your Mac.")
             }
+        } catch {
+            fail(error.localizedDescription)
+        }
+    }
 
-            for try await event in events {
-                // The invocation itself failed — a rejected command name, a
-                // model that doesn't exist. No session event will ever say
-                // so, because the turn never started.
-                if let error = await failure.error {
-                    fail(error.localizedDescription)
-                    return
+    /// Watch a session indefinitely: the same translation as a prompt turn,
+    /// with nothing invoked. This is how activity that started somewhere
+    /// else — the OpenCode TUI in a terminal, another device — reaches an
+    /// open session view. A watch outlives any one SSE subscription
+    /// (OpenCode restarts; the thread is still the thread), so it
+    /// resubscribes until the connection that asked goes away, which
+    /// arrives here as task cancellation.
+    @MainActor
+    static func observe(
+        sessionID: String, directory: String,
+        adapter: @escaping () -> OpenCodeAdapter?,
+        emit: @escaping (Wire.Event) -> Void
+    ) async {
+        while !Task.isCancelled {
+            // Re-resolved each pass: a restarted OpenCode is a new port.
+            if let adapter = adapter() {
+                let events = adapter.events(directory: directory)
+                _ = try? await pump(
+                    events, sessionID: sessionID, directory: directory, adapter: adapter,
+                    failure: nil, stopAtIdle: false, emit: emit
+                )
+            }
+            guard !Task.isCancelled else { return }
+            try? await Task.sleep(for: .seconds(2))
+        }
+    }
+
+    /// Why the shared event loop returned.
+    private enum PumpEnd {
+        /// The session went idle and the turn's closing events (diff, idle,
+        /// done) are out. Prompt turns only.
+        case idle
+        /// A terminal failure was already emitted. Prompt turns only.
+        case failed
+        /// The SSE stream itself ended — OpenCode went away.
+        case streamEnded
+    }
+
+    /// The one event loop, shared by prompt turns and watches: consume an
+    /// instance's SSE feed and translate one session's events to protocol
+    /// v1. A prompt turn (`stopAtIdle`) ends at the session's next idle and
+    /// checks its invocation for failure; a watch runs until the stream
+    /// dies, treating idle as a lap marker rather than a finish line.
+    @MainActor
+    private static func pump(
+        _ events: AsyncThrowingStream<[String: Any], Error>,
+        sessionID: String, directory: String, adapter: OpenCodeAdapter,
+        failure: InvocationFailure?, stopAtIdle: Bool,
+        emit: @escaping (Wire.Event) -> Void
+    ) async throws -> PumpEnd {
+        func fail(_ message: String) {
+            var e = Wire.Event(kind: "failed")
+            e.text = message
+            emit(e)
+            emit(Wire.Event(kind: "done"))
+        }
+
+        // Which message each part belongs to, and whose it is. The part
+        // events don't carry a role, and the user's own message streams
+        // back through the same channel as the agent's — without this,
+        // the prompt appears a second time in the transcript as if the
+        // agent had said it.
+        var roles: [String: String] = [:]
+        // Text accumulated per part from the delta stream, and each
+        // part's type. Reasoning only ever gets two
+        // `message.part.updated` events — one empty at the start and
+        // one complete at the end — so without the deltas the thinking
+        // block sits blank and then snaps to the finished text.
+        // `message.part.delta` is where the tokens actually are.
+        var partText: [String: String] = [:]
+        var partType: [String: String] = [:]
+        // Deltas arrive per token — 125 of them for one DeepSeek
+        // thinking block, measured. Each protocol event carries the
+        // whole accumulated text, so forwarding every one is quadratic
+        // in bytes on a link where bytes are seconds, and LiveTurns
+        // buffers all of them for replay. Ten a second still reads as
+        // live typing; the flush at idle guarantees nothing is lost.
+        var lastEmit: [String: Date] = [:]
+        let minimumInterval: TimeInterval = 0.1
+
+        func emitPart(_ partID: String, force: Bool) {
+            guard let kind = partType[partID],
+                  kind == "reasoning" || kind == "text",
+                  let text = partText[partID], !text.isEmpty
+            else { return }
+            if !force, let last = lastEmit[partID],
+               Date().timeIntervalSince(last) < minimumInterval { return }
+            lastEmit[partID] = Date()
+            var e = Wire.Event(kind: "part")
+            e.part = TurnPart(type: kind, id: partID, text: text)
+            e.session = sessionID
+            emit(e)
+        }
+
+        for try await event in events {
+            // The invocation itself failed — a rejected command name, a
+            // model that doesn't exist. No session event will ever say
+            // so, because the turn never started.
+            if let failure, let error = await failure.error {
+                fail(error.localizedDescription)
+                return .failed
+            }
+            let type = event["type"] as? String ?? ""
+            let properties = event["properties"] as? [String: Any] ?? [:]
+            switch type {
+            case "message.updated":
+                if let info = properties["info"] as? [String: Any],
+                   let id = info["id"] as? String, let role = info["role"] as? String {
+                    roles[id] = role
                 }
-                let type = event["type"] as? String ?? ""
-                let properties = event["properties"] as? [String: Any] ?? [:]
-                switch type {
-                case "message.updated":
-                    if let info = properties["info"] as? [String: Any],
-                       let id = info["id"] as? String, let role = info["role"] as? String {
-                        roles[id] = role
-                    }
-                case "message.part.updated":
-                    guard let part = properties["part"] as? [String: Any],
-                          part["sessionID"] as? String == sessionID
-                    else { continue }
-                    // The phone already showed what the user typed; echoing
-                    // it back would render it a second time, full-width, as
-                    // though the agent had written it.
-                    if let messageID = part["messageID"] as? String,
-                       roles[messageID] == "user" { continue }
-                    // A snapshot is authoritative — it replaces whatever
-                    // the deltas had accumulated, and it is how we learn
-                    // what kind of part this is.
-                    if let partID = part["id"] as? String {
-                        partType[partID] = part["type"] as? String
-                        if let text = part["text"] as? String, !text.isEmpty {
-                            partText[partID] = text
-                        }
-                    }
-                    guard let mapped = OpenCodeAdapter.turnPart(from: part, role: "assistant")
+            case "message.part.updated":
+                guard let part = properties["part"] as? [String: Any],
+                      part["sessionID"] as? String == sessionID
+                else { continue }
+                // On a prompt turn the phone already showed what the
+                // user typed; echoing it back would render it a second
+                // time, full-width, as though the agent had written it.
+                // On a watch the words were typed somewhere else — the
+                // TUI — and forwarding them is the point.
+                if let messageID = part["messageID"] as? String,
+                   roles[messageID] == "user" {
+                    if stopAtIdle { continue }
+                    guard let mapped = OpenCodeAdapter.turnPart(from: part, role: "user")
                     else { continue }
                     var e = Wire.Event(kind: "part")
                     e.part = mapped
                     e.session = sessionID
                     emit(e)
-                // 1.18 asks with `permission.asked`; 1.16-era servers said
-                // `permission.updated`. Same skew note as the adapter.
-                case "permission.asked", "permission.updated":
-                    guard let mapped = OpenCodeAdapter.permission(from: properties),
-                          mapped.sessionID == nil || mapped.sessionID == sessionID
-                    else { continue }
-                    var e = Wire.Event(kind: "permission")
-                    e.permission = mapped
-                    e.session = sessionID
-                    emit(e)
-                case "message.part.delta":
-                    // `{sessionID, messageID, partID, field, delta}` —
-                    // the actual token stream, for both reasoning and the
-                    // answer.
-                    guard properties["sessionID"] as? String == sessionID,
-                          properties["field"] as? String == "text",
-                          let partID = properties["partID"] as? String,
-                          let delta = properties["delta"] as? String
-                    else { continue }
-                    if let messageID = properties["messageID"] as? String,
-                       roles[messageID] == "user" { continue }
-                    partText[partID, default: ""] += delta
-                    // Until a snapshot has told us the kind, hold the text
-                    // rather than guessing — rendering reasoning as the
-                    // answer would be worse than a beat of delay.
-                    emitPart(partID, force: false)
-                case "todo.updated":
-                    // The agent's own plan for the turn, as it evolves —
-                    // the clearest possible answer to "what is it doing".
-                    guard properties["sessionID"] as? String == sessionID else { continue }
-                    let raw = properties["todos"] as? [[String: Any]]
-                        ?? properties["todo"] as? [[String: Any]] ?? []
-                    var e = Wire.Event(kind: "todos")
-                    e.todos = OpenCodeAdapter.todos(from: raw)
-                    e.session = sessionID
-                    emit(e)
-                case "question.asked", "question.updated":
-                    guard let mapped = OpenCodeAdapter.question(from: properties),
-                          mapped.sessionID == nil || mapped.sessionID == sessionID
-                    else { continue }
-                    var e = Wire.Event(kind: "question")
-                    e.question = mapped
-                    e.session = sessionID
-                    emit(e)
-                case "session.error":
-                    guard properties["sessionID"] as? String == sessionID else { continue }
-                    fail("The agent hit an error on your Mac.")
-                    return
-                case "session.idle":
-                    guard properties["sessionID"] as? String == sessionID else { continue }
-                    // Whatever the throttle held back, send now — the last
-                    // tokens of a thought must not be the ones dropped.
-                    for partID in partText.keys { emitPart(partID, force: true) }
-                    var diff = Wire.Event(kind: "diff")
-                    diff.diffs = (try? await adapter.turnDiffs(
-                        sessionID: sessionID, directory: directory
-                    )) ?? []
-                    diff.session = sessionID
-                    emit(diff)
-                    emit(Wire.Event(kind: "idle"))
-                    emit(Wire.Event(kind: "done"))
-                    return
-                default:
                     continue
                 }
+                // A snapshot is authoritative — it replaces whatever
+                // the deltas had accumulated, and it is how we learn
+                // what kind of part this is.
+                if let partID = part["id"] as? String {
+                    partType[partID] = part["type"] as? String
+                    if let text = part["text"] as? String, !text.isEmpty {
+                        partText[partID] = text
+                    }
+                }
+                guard let mapped = OpenCodeAdapter.turnPart(from: part, role: "assistant")
+                else { continue }
+                var e = Wire.Event(kind: "part")
+                e.part = mapped
+                e.session = sessionID
+                emit(e)
+            // 1.18 asks with `permission.asked`; 1.16-era servers said
+            // `permission.updated`. Same skew note as the adapter.
+            case "permission.asked", "permission.updated":
+                guard let mapped = OpenCodeAdapter.permission(from: properties),
+                      mapped.sessionID == nil || mapped.sessionID == sessionID
+                else { continue }
+                var e = Wire.Event(kind: "permission")
+                e.permission = mapped
+                e.session = sessionID
+                emit(e)
+            case "permission.replied":
+                // Watches only: the ask was answered somewhere else
+                // (the TUI, another device), so take the card down — a
+                // bare permission event with no payload is the clear.
+                // Prompt turns skip this; their replies come from the
+                // client that is showing the card.
+                guard !stopAtIdle,
+                      properties["sessionID"] as? String ?? sessionID == sessionID
+                else { continue }
+                var e = Wire.Event(kind: "permission")
+                e.session = sessionID
+                emit(e)
+            case "message.part.delta":
+                // `{sessionID, messageID, partID, field, delta}` —
+                // the actual token stream, for both reasoning and the
+                // answer.
+                guard properties["sessionID"] as? String == sessionID,
+                      properties["field"] as? String == "text",
+                      let partID = properties["partID"] as? String,
+                      let delta = properties["delta"] as? String
+                else { continue }
+                if let messageID = properties["messageID"] as? String,
+                   roles[messageID] == "user" { continue }
+                partText[partID, default: ""] += delta
+                // Until a snapshot has told us the kind, hold the text
+                // rather than guessing — rendering reasoning as the
+                // answer would be worse than a beat of delay.
+                emitPart(partID, force: false)
+            case "todo.updated":
+                // The agent's own plan for the turn, as it evolves —
+                // the clearest possible answer to "what is it doing".
+                guard properties["sessionID"] as? String == sessionID else { continue }
+                let raw = properties["todos"] as? [[String: Any]]
+                    ?? properties["todo"] as? [[String: Any]] ?? []
+                var e = Wire.Event(kind: "todos")
+                e.todos = OpenCodeAdapter.todos(from: raw)
+                e.session = sessionID
+                emit(e)
+            case "question.asked", "question.updated":
+                guard let mapped = OpenCodeAdapter.question(from: properties),
+                      mapped.sessionID == nil || mapped.sessionID == sessionID
+                else { continue }
+                var e = Wire.Event(kind: "question")
+                e.question = mapped
+                e.session = sessionID
+                emit(e)
+            case "session.error":
+                guard properties["sessionID"] as? String == sessionID else { continue }
+                if stopAtIdle {
+                    fail("The agent hit an error on your Mac.")
+                    return .failed
+                }
+                // A watched turn erred; the thread is still alive, so
+                // say so without done and keep watching.
+                var e = Wire.Event(kind: "failed")
+                e.text = "The agent hit an error on your Mac."
+                emit(e)
+            case "session.idle":
+                guard properties["sessionID"] as? String == sessionID else { continue }
+                // Whatever the throttle held back, send now — the last
+                // tokens of a thought must not be the ones dropped.
+                for partID in partText.keys { emitPart(partID, force: true) }
+                var diff = Wire.Event(kind: "diff")
+                diff.diffs = (try? await adapter.turnDiffs(
+                    sessionID: sessionID, directory: directory
+                )) ?? []
+                diff.session = sessionID
+                emit(diff)
+                emit(Wire.Event(kind: "idle"))
+                if stopAtIdle {
+                    emit(Wire.Event(kind: "done"))
+                    return .idle
+                }
+            default:
+                continue
             }
-            // The SSE stream ended without an idle — OpenCode went away.
-            fail("Lost OpenCode's event stream on your Mac.")
-        } catch {
-            fail(error.localizedDescription)
         }
+        return .streamEnded
     }
 }

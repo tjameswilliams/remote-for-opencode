@@ -91,6 +91,11 @@ struct SessionView: View {
         }
         .task {
             turn.active = scenePhase == .active
+            // Watch first, then load: anything that lands between the two
+            // arrives through both and dedupes by part id, where the other
+            // order would leave a gap. The watch is what makes a turn
+            // driven from the OpenCode TUI show up here live.
+            turn.watch()
             await turn.loadTranscript()
         }
         .task { await models.loadIfNeeded() }
@@ -102,6 +107,13 @@ struct SessionView: View {
             // Back on screen with a turn unfinished: the socket is dead
             // (iOS killed it), the Mac's work isn't. Pick the turn back up.
             if scenePhase == .active, turn.running { turn.resume() }
+            if scenePhase == .active {
+                // The watch died with the socket, and whatever the TUI did
+                // while this was backgrounded is a gap only the transcript
+                // can fill: watch again, then reload (upserts dedupe).
+                turn.watch()
+                Task { await turn.loadTranscript() }
+            }
             // Leaving with the mic live would keep recording off-screen.
             if scenePhase != .active { dictation.stop() }
         }

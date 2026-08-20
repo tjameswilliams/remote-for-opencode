@@ -14,8 +14,14 @@ let package = Package(
     products: [
         .library(name: "RemoteKit", targets: ["RemoteKit"]),
     ],
+    dependencies: [
+        // Syntax highlighting for code the agent writes (highlight.js via
+        // JavaScriptCore). Pinned exactly, like Sparkle: dependencies move
+        // when we decide, not when they release.
+        .package(url: "https://github.com/raspu/Highlightr", exact: "2.3.0"),
+    ],
     targets: [
-        .target(name: "RemoteKit"),
+        .target(name: "RemoteKit", dependencies: ["Highlightr"]),
         .testTarget(name: "RemoteKitTests", dependencies: ["RemoteKit"]),
     ]
 )

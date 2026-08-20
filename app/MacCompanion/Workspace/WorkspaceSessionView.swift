@@ -144,7 +144,14 @@ struct WorkspaceSessionView: View {
             state.pendingCommand = nil
             input = "/\(command.name)" + (command.takesArguments ? " " : "")
         }
-        .task { await turn.loadTranscript() }
+        .task {
+            // Watch first, then load: anything that lands between the two
+            // arrives through both and dedupes by part id, where the other
+            // order would leave a gap. The watch is what makes a turn
+            // driven from the OpenCode TUI show up here live.
+            turn.watch()
+            await turn.loadTranscript()
+        }
     }
 
     private func send() {

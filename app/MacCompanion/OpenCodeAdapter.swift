@@ -634,6 +634,18 @@ struct OpenCodeAdapter {
         return QuestionRequest(id: id, sessionID: body["sessionID"] as? String, questions: items)
     }
 
+    /// A preview may not cost more than this on the wire. Chosen to hold a
+    /// few hundred lines of code; anything bigger reads better in the
+    /// turn's diff anyway. Cut at a line boundary so the last visible line
+    /// is a real one, not half of one.
+    static let previewLimit = 16 << 10
+
+    private static func cappedPreview(_ code: String) -> String {
+        guard code.count > previewLimit else { return code }
+        let head = String(code.prefix(previewLimit))
+        return head[..<(head.lastIndex(of: "\n") ?? head.endIndex)] + "\n…"
+    }
+
     /// An OpenCode message part → the phone's TurnPart, or nil for part
     /// types the phone doesn't render.
     static func turnPart(from part: [String: Any], role: String) -> TurnPart? {
@@ -651,10 +663,19 @@ struct OpenCodeAdapter {
             return TurnPart(type: "reasoning", id: id, text: part["text"] as? String)
         case "tool":
             let state = part["state"] as? [String: Any]
+            // The code a write/edit is producing lives in the tool call's
+            // input (verified against 1.18-era storage: write carries
+            // {filePath, content}, edit {filePath, oldString, newString}).
+            // Forwarding it is what turns the tool row from "edit…" into
+            // the code itself, the way OpenCode's own TUI previews it.
+            let input = state?["input"] as? [String: Any]
+            let code = input?["content"] as? String ?? input?["newString"] as? String
             return TurnPart(
                 type: "tool", id: id,
                 tool: part["tool"] as? String,
-                status: state?["status"] as? String
+                status: state?["status"] as? String,
+                file: code == nil ? nil : input?["filePath"] as? String,
+                preview: code.map(cappedPreview)
             )
         case "subtask":
             // A command with `subtask: true` (like /review) runs in a

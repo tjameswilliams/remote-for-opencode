@@ -34,6 +34,11 @@ final class TurnController: ObservableObject {
     private var turnID: String?
     private var cursor = 0
 
+    /// The standing watch on this session, when one is open. Separate from
+    /// the turn machinery on purpose: a watch has no cursor and no resume —
+    /// losing one costs nothing a transcript reload doesn't recover.
+    private var watchTask: Task<Void, Never>?
+
     /// Whether the client is on screen right now. Drives the response to an
     /// interrupted socket: reconnect immediately when visible, wait to be
     /// resumed otherwise. The phone mirrors scenePhase into this; the
@@ -185,6 +190,91 @@ final class TurnController: ObservableObject {
             rows[index] = part
         } else {
             rows.append(part)
+        }
+    }
+
+    // MARK: - Watching
+
+    /// Live updates for activity this client didn't start — a turn driven
+    /// from the OpenCode TUI in a terminal, or from another device. Holds
+    /// one long-lived `watch` request open; the Mac relays the session's
+    /// events as they happen and this folds them into the same rows the
+    /// turn stream fills, deduped by part id.
+    func watch() {
+        guard watchTask == nil, session != nil else { return }
+        // Weak throughout: the watch must not keep a dismissed screen's
+        // controller alive — deinit's cancel is what ends it, and a strong
+        // capture across the long-lived stream would prevent exactly that.
+        watchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let session = self?.session, let project = self?.project,
+                      let link = self?.makeLink()
+                else { break }
+                var request = Wire.Request(kind: "watch")
+                request.session = session
+                request.project = project
+                // A healthy watch never completes: `done` only arrives when
+                // the Mac declined it (an older companion, no path to the
+                // Mac), and asking again would get the same answer.
+                var declined = false
+                for await event in link.run(request) {
+                    guard let self else { return }
+                    if event.kind == "done" { declined = true }
+                    self.handleWatch(event)
+                }
+                if declined || Task.isCancelled || self?.active != true { break }
+                // The socket died mid-watch (sleep, network change). The
+                // thread is still on screen, so pick the watch back up.
+                try? await Task.sleep(for: .seconds(2))
+            }
+            self?.watchTask = nil
+        }
+    }
+
+    func stopWatching() {
+        watchTask?.cancel()
+        watchTask = nil
+    }
+
+    deinit {
+        watchTask?.cancel()
+    }
+
+    /// Watch events reuse the turn vocabulary but not its lifecycle: parts
+    /// mean the session is busy, idle means it settled, and failures stay
+    /// quiet — a watch is an enhancement, and its errors must not paint an
+    /// otherwise healthy transcript red.
+    private func handleWatch(_ event: Wire.Event) {
+        switch event.kind {
+        case "part":
+            guard let part = event.part else { return }
+            // Our own prompt echoes back through the watch while a turn is
+            // in flight; the transcript already has it.
+            if part.type == "user", turnID != nil { return }
+            if !running {
+                turnStartedAt = Date()
+                running = true
+            }
+            upsert(part)
+        case "todos":
+            todos = event.todos ?? []
+        case "diff":
+            diffs = event.diffs ?? []
+        case "permission":
+            // Nil payload means the ask was answered somewhere else — the
+            // TUI, another device — and the card comes down.
+            permission = event.permission
+        case "question":
+            question = event.question
+        case "idle":
+            // Our own turn's lifecycle owns `running` while it's in flight.
+            if turnID == nil {
+                running = false
+                permission = nil
+                question = nil
+            }
+        default:
+            break
         }
     }
 

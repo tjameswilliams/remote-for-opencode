@@ -156,19 +156,37 @@ struct PartRow: View {
             MarkdownText(text: part.text ?? "")
                 .foregroundStyle(Color.ink)
         case "tool":
-            Label {
-                Text(part.tool ?? "tool")
-            } icon: {
-                switch part.status {
-                case "completed": Image(systemName: "checkmark.circle")
-                case "error": Image(systemName: "xmark.circle")
-                default: ProgressView().controlSize(.small)
+            VStack(alignment: .leading, spacing: 6) {
+                Label {
+                    // A write/edit names its file — "edit · Transcript.swift"
+                    // says what's happening; "edit" alone says almost nothing.
+                    Text(toolTitle)
+                } icon: {
+                    switch part.status {
+                    case "completed": Image(systemName: "checkmark.circle")
+                    case "error": Image(systemName: "xmark.circle")
+                    default: ProgressView().controlSize(.small)
+                    }
+                }
+                .font(.callout)
+                .foregroundStyle(Color.inkMuted)
+                // The code being written, as OpenCode's own TUI previews it.
+                // Identity is the part id: an upserted snapshot must update
+                // this block in place, not reset its expansion.
+                if let preview = part.preview {
+                    CodePreview(code: preview, file: part.file)
+                        .id(part.id)
                 }
             }
-            .font(.callout)
-            .foregroundStyle(Color.inkMuted)
         default:
             EmptyView()
         }
+    }
+
+    private var toolTitle: String {
+        guard let file = part.file?.split(separator: "/").last else {
+            return part.tool ?? "tool"
+        }
+        return "\(part.tool ?? "tool") · \(file)"
     }
 }
