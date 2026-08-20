@@ -2,10 +2,10 @@ import RemoteKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The prompt bar, desktop grammar: Return sends, Option-Return breaks the
-/// line, files arrive by drag, paste, or the open panel. Same rounded
-/// container and chip row as the phone — it should read as the same
-/// product at a different desk.
+/// The prompt bar, desktop grammar: Return sends, Shift-Return or
+/// Option-Return breaks the line, files arrive by drag, paste, or the open
+/// panel. Same rounded container and chip row as the phone — it should
+/// read as the same product at a different desk.
 struct DesktopComposer: View {
     @Binding var input: String
     let running: Bool
@@ -17,6 +17,8 @@ struct DesktopComposer: View {
 
     @State private var showingFiles = false
     @FocusState private var focused: Bool
+    /// The Shift-Return interceptor; installed while this composer exists.
+    @State private var keyMonitor: Any?
 
     private var empty: Bool {
         input.trimmingCharacters(in: .whitespaces).isEmpty
@@ -91,6 +93,39 @@ struct DesktopComposer: View {
             paste(providers)
         }
         .task { focused = true }
+        .onAppear {
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                breakLine(event)
+            }
+        }
+        .onDisappear {
+            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+            keyMonitor = nil
+        }
+    }
+
+    /// Shift-Return breaks the line — the chat-app convention everyone's
+    /// hands already know. AppKit has no binding for it (a field editor
+    /// treats it as plain Return, which submits), so the event is re-keyed
+    /// as Option-Return, the break AppKit does honor: the field editor
+    /// inserts the newline at the caret, where appending to the binding
+    /// would dump it at the end of the text. Transforming rather than
+    /// swallowing keeps this idempotent when several workspace windows
+    /// each hold a monitor.
+    private func breakLine(_ event: NSEvent) -> NSEvent? {
+        guard focused,
+              event.keyCode == 36,   // Return; the keypad's Enter stays a submit.
+              event.modifierFlags.intersection([.shift, .command, .option, .control]) == .shift
+        else { return event }
+        return NSEvent.keyEvent(
+            with: .keyDown, location: event.locationInWindow,
+            modifierFlags: event.modifierFlags.subtracting(.shift).union(.option),
+            timestamp: event.timestamp, windowNumber: event.windowNumber,
+            context: nil,
+            characters: event.characters ?? "\r",
+            charactersIgnoringModifiers: event.charactersIgnoringModifiers ?? "\r",
+            isARepeat: event.isARepeat, keyCode: event.keyCode
+        ) ?? event
     }
 
     private var addButton: some View {
