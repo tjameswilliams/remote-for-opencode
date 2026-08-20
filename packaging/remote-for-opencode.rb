@@ -12,8 +12,8 @@
 # auto_updates true tells brew this app updates itself (via Sparkle), so
 # `brew upgrade` leaves it alone rather than fighting the in-app updater.
 cask "remote-for-opencode" do
-  version "1.2"
-  sha256 "5f8aa5bdc45bc1b9e9d8d33364d8dd6f329d7e7536b2321f25ed01d1ed542052"
+  version "1.3"
+  sha256 "f651f0cc183c48d11072629393093fb8aeef087dcae966948866c424d07dfaaa"
 
   # Versioned, not the stable /RemoteForOpenCode.dmg the website links: that
   # one is overwritten by every deploy, so pairing it with a pinned sha256
