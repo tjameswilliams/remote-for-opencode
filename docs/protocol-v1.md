@@ -35,6 +35,20 @@ have already observed.
   - Only projects previously opened with OpenCode; Mac-side git discovery
     supplements this for never-opened repos.
 
+### `project.add` / `project.remove`
+- `{kind: "project.add", project: "<path>"}` pins a folder as a project
+  source on the Mac. No OpenCode call: the Mac expands a tilde,
+  standardizes the path, verifies it is an existing directory (a readable
+  `failed` otherwise), and persists it in the companion's defaults
+  (`projectFolders`). Duplicates are a silent success.
+- `{kind: "project.remove", project: "<path>"}` unpins one. Only paths
+  added this way are stored, so removing anything else is a no-op.
+- Both answer with a fresh `projects` event (the merged list: known, then
+  pinned folders, then discovered repos), so the client replaces its list
+  rather than patching it. Pinned entries carry `id: "folder:<path>"` and
+  `added: true`; once OpenCode opens the folder it appears as a known
+  project instead and the stored pin goes quiet.
+
 ### `sessions`
 - `GET /experimental/session?limit=N` → cross-project, recency-sorted
   `[{id, title, directory, ...}]`. Supports `search`, `cursor`, `archived`.
@@ -121,6 +135,31 @@ hang forever.
 request. Its rows are already `FileDiff`-shaped
 (`{file, patch, additions, deletions, status}`). All verified live.
 
+### `watch` — live view of a session this client didn't prompt
+- `{kind: "watch", session, project}` subscribes to the session's live
+  events, translated exactly like a prompt turn's (same event loop on the
+  Mac — TurnRunner's pump, shared, not forked): `part`, `todos`, `diff` +
+  `idle` at each turn boundary, `permission`/`question` asks. This is how
+  a turn driven from the OpenCode TUI (or another device) animates an
+  open session view in the GUI.
+- Differences from a prompt turn's stream:
+  - **User parts are forwarded** (type `"user"`), because the watching
+    client never saw the words typed in the TUI. Clients drop them while
+    their own turn is in flight, since the prompt is already on screen.
+  - **`idle` is a lap marker, not an ending** — no `done` follows; the
+    watch keeps going across turns. `done` only arrives when the Mac
+    declined the watch (older companion), which the client treats as
+    "don't retry".
+  - **`permission.replied` becomes a bare `permission` event** (no
+    payload): the ask was answered elsewhere, take the card down.
+  - Failures never end the watch: a `session.error` is relayed as
+    `failed` without `done` and the watch continues.
+- Lifetime: one connection per watch; the client ends it by closing the
+  transport, which cancels the Mac-side task. The Mac resubscribes to the
+  SSE feed if it drops (OpenCode restart) for as long as the connection
+  lives. Clients reload the transcript when (re)starting a watch — parts
+  dedupe by id, so overlap is safe and gaps are filled.
+
 ### `pending` (added for M3 push)
 - v1 request `{kind: "pending", project}` → one event
   `{kind: "pending", permissions: [PermissionRequest]}` from
@@ -157,6 +196,16 @@ Two sources with different lifetimes:
     `step-start`, `step-finish`, `patch`.
 - Reconnect strategy (LiveTurns on the Mac): replay transcript, then live
   events. Message/part IDs are stable — dedupe on them.
+- **Tool parts carry a code preview.** A `tool` part whose `state.input`
+  has code in it (write: `{filePath, content}`; edit:
+  `{filePath, oldString, newString}` — both verified against 1.18-era
+  storage) maps to a v1 part with `file` and `preview`, so the chat can
+  show the code as it is written, the way OpenCode's TUI does. The preview
+  is capped at 16K characters, cut at a line boundary; the full change
+  still arrives as the turn's diff. Input appears when the tool part
+  reaches `running`, so the preview is per-snapshot, not per-token; the
+  token-level version would need the `session.next.tool.input.delta`
+  family plus partial-JSON accumulation (deliberately deferred).
 - **`message.part.updated` carries no role**, and the user's own message
   streams back through the same channel as the agent's. The adapter builds
   a messageID→role map from `message.updated` and drops parts belonging to

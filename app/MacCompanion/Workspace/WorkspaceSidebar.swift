@@ -1,5 +1,6 @@
 import RemoteKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The workspace's left column: which Mac, which conversation, which
 /// project. Structure is space and weight, not separators — the sidebar
@@ -8,6 +9,11 @@ struct WorkspaceSidebar: View {
     @ObservedObject var state: WorkspaceState
     @State private var renaming: Session?
     @State private var newTitle = ""
+    /// This Mac's folders come from a real picker; a remote Mac's disk
+    /// can't be browsed from here, so its path gets typed instead.
+    @State private var pickingFolder = false
+    @State private var typingFolder = false
+    @State private var typedFolderPath = ""
 
     var body: some View {
         List(selection: $state.selection) {
@@ -35,6 +41,22 @@ struct WorkspaceSidebar: View {
                 if let s = renaming { state.rename(s, to: newTitle) }
                 renaming = nil
             }
+        }
+        .fileImporter(
+            isPresented: $pickingFolder, allowedContentTypes: [.folder]
+        ) { result in
+            if case let .success(url) = result { state.addFolder(url.path) }
+        }
+        .alert("Add a folder on \(state.activePeer?.name ?? "this Mac")", isPresented: $typingFolder) {
+            TextField("~/path/to/project", text: $typedFolderPath)
+            Button("Cancel", role: .cancel) { typingFolder = false }
+            Button("Add") {
+                let path = typedFolderPath
+                typedFolderPath = ""
+                state.addFolder(path)
+            }
+        } message: {
+            Text("The full path of the folder, as that Mac sees it.")
         }
     }
 
@@ -90,12 +112,25 @@ struct WorkspaceSidebar: View {
     }
 
     private var searchField: some View {
-        TextField("Search sessions", text: $state.search)
-            .textFieldStyle(.roundedBorder)
-            .controlSize(.small)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .onChange(of: state.search) { state.searchChanged() }
+        HStack(spacing: 6) {
+            TextField("Search sessions", text: $state.search)
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+                .onChange(of: state.search) { state.searchChanged() }
+            // The lists load once per window otherwise, and a session
+            // started in a terminal has no way to announce itself.
+            Button {
+                Task { await state.load() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.borderless)
+            .disabled(state.loading)
+            .help("Refresh sessions and projects (⌘R)")
+            .accessibilityLabel("Refresh sessions and projects")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
     }
 
     @ViewBuilder
@@ -131,7 +166,7 @@ struct WorkspaceSidebar: View {
     /// conversation, not a place to start one.
     @ViewBuilder
     private var projectSection: some View {
-        if !state.projects.isEmpty, state.search.isEmpty {
+        if state.search.isEmpty {
             Section("Projects") {
                 ForEach(state.projects) { project in
                     HStack {
@@ -154,8 +189,26 @@ struct WorkspaceSidebar: View {
                         Button("New Session") {
                             state.selection = .project(project)
                         }
+                        if project.added == true {
+                            Button("Remove from Projects", role: .destructive) {
+                                state.removeFolder(project)
+                            }
+                        }
                     }
                 }
+                Button {
+                    // A remote Mac's disk can't be browsed from here.
+                    if state.activePeer == nil {
+                        pickingFolder = true
+                    } else {
+                        typingFolder = true
+                    }
+                } label: {
+                    Label("Add Folder…", systemImage: "plus")
+                        .font(.callout)
+                        .foregroundStyle(Color.inkMuted)
+                }
+                .buttonStyle(.plain)
             }
         }
     }

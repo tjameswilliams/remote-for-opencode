@@ -36,7 +36,12 @@ public enum Wire {
     public struct Request: Codable {
         /// "status" | "projects" | "sessions" | "models" | "prompt" |
         /// "resume" | "abort" | "permission" | "question" | "pending" |
-        /// "transcript"
+        /// "transcript" | "project.add" | "project.remove" | "watch"
+        ///
+        /// "watch" (session + project) is the one subscription: the Mac
+        /// relays the session's live events — parts, todos, diffs,
+        /// permissions, questions, idle — until the client hangs up. No
+        /// `done` ever follows a healthy watch; it has no natural end.
         public var kind: String
         /// prompt/resume: the phone-minted turn id, so an answer can outlive
         /// the socket that asked for it (iOS suspends sockets on background;
@@ -45,7 +50,8 @@ public enum Wire {
         /// resume: how many events of this turn the phone has already seen.
         public var from: Int?
         /// prompt: worktree path to start in (new session), when `session`
-        /// is absent.
+        /// is absent. project.add/project.remove: the folder path on the
+        /// Mac (tilde allowed); both answer with a fresh `projects` event.
         public var project: String?
         /// prompt/abort/transcript: the OpenCode session to continue.
         public var session: String?

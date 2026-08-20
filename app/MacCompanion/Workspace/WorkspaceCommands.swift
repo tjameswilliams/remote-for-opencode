@@ -12,6 +12,7 @@ enum WorkspaceCommand {
     static let reject = Notification.Name("workspace.reject")
     static let previousSession = Notification.Name("workspace.previousSession")
     static let nextSession = Notification.Name("workspace.nextSession")
+    static let refresh = Notification.Name("workspace.refresh")
 
     static func post(_ name: Notification.Name, tab: InspectorTab? = nil) {
         NotificationCenter.default.post(
@@ -45,6 +46,11 @@ struct WorkspaceCommands: Commands {
         }
 
         CommandGroup(after: .sidebar) {
+            // Sessions started outside this app (the OpenCode CLI, another
+            // device) only show up when the lists are re-asked for.
+            Button("Refresh Sessions") { WorkspaceCommand.post(WorkspaceCommand.refresh) }
+                .keyboardShortcut("r", modifiers: .command)
+            Divider()
             Button("Toggle Inspector") { WorkspaceCommand.post(WorkspaceCommand.toggleInspector) }
                 .keyboardShortcut("0", modifiers: [.command, .option])
             Button("Changes") { WorkspaceCommand.post(WorkspaceCommand.inspectorTab, tab: .changes) }

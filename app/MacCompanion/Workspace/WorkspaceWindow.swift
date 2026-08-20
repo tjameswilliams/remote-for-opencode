@@ -74,6 +74,17 @@ struct WorkspaceWindow: View {
         .onReceive(NotificationCenter.default.publisher(for: WorkspaceCommand.nextSession)) { _ in
             state.step(1)
         }
+        .onReceive(NotificationCenter.default.publisher(for: WorkspaceCommand.refresh)) { _ in
+            Task { await state.load() }
+        }
+        // Coming back to the app is the moment a session started elsewhere
+        // (the OpenCode CLI in a terminal, the phone) should already be in
+        // the sidebar, without anyone knowing to ask.
+        .onReceive(
+            NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+        ) { _ in
+            Task { await state.load() }
+        }
         .onChange(of: state.selection) { persistSelection() }
         .onChange(of: state.inspectorShown) { storedInspectorShown = state.inspectorShown }
         .onChange(of: state.inspectorTab) { storedInspectorTab = state.inspectorTab.rawValue }

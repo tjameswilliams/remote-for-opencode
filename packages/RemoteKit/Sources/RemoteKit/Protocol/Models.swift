@@ -38,16 +38,22 @@ public struct Project: Codable, Hashable, Identifiable, Sendable {
     public var updated: Date?
     /// False for discovered-but-never-opened repos.
     public var known: Bool?
+    /// True for folders the user pinned by hand ("Add Folder"), which are
+    /// the only projects a client may offer to remove: known projects are
+    /// OpenCode's history and discovered repos would reappear on the next
+    /// disk walk.
+    public var added: Bool?
 
     public init(
         id: String, worktree: String, name: String? = nil,
-        updated: Date? = nil, known: Bool? = nil
+        updated: Date? = nil, known: Bool? = nil, added: Bool? = nil
     ) {
         self.id = id
         self.worktree = worktree
         self.name = name
         self.updated = updated
         self.known = known
+        self.added = added
     }
 
     public var displayName: String {
@@ -355,15 +361,25 @@ public struct TurnPart: Codable, Equatable, Sendable {
     public var tool: String?
     /// tool: "pending" | "running" | "completed" | "error".
     public var status: String?
+    /// tool: the file a write/edit is touching (absolute path on the Mac).
+    public var file: String?
+    /// tool: the code being written there (a write's whole content, an
+    /// edit's replacement), capped at the adapter so a generated 2,000-line
+    /// file can't flood the link. The full change still arrives as the
+    /// turn's diff; this is the live preview.
+    public var preview: String?
 
     public init(
         type: String, id: String? = nil, text: String? = nil,
-        tool: String? = nil, status: String? = nil
+        tool: String? = nil, status: String? = nil,
+        file: String? = nil, preview: String? = nil
     ) {
         self.type = type
         self.id = id
         self.text = text
         self.tool = tool
         self.status = status
+        self.file = file
+        self.preview = preview
     }
 }

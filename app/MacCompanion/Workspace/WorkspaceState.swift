@@ -120,6 +120,33 @@ final class WorkspaceState: ObservableObject {
         }
     }
 
+    /// Pin a folder as a project source on the active Mac. The Mac
+    /// validates the path and answers with the merged project list, so the
+    /// sidebar shows exactly what every other client would see.
+    func addFolder(_ path: String) {
+        sendFolderEdit(kind: "project.add", path: path)
+    }
+
+    /// Only offered for user-added folders (`project.added == true`);
+    /// known projects and discovered repos aren't removable.
+    func removeFolder(_ project: Project) {
+        sendFolderEdit(kind: "project.remove", path: project.worktree)
+    }
+
+    private func sendFolderEdit(kind: String, path: String) {
+        var request = Wire.Request(kind: kind)
+        request.project = path
+        Task {
+            for await event in makeLink().run(request) {
+                switch event.kind {
+                case "projects": projects = event.projects ?? []
+                case "failed": error = event.text
+                default: break
+                }
+            }
+        }
+    }
+
     /// Debounces typing into one request per pause, so a search doesn't
     /// fire a round trip per keystroke.
     func searchChanged() {

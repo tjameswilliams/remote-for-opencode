@@ -18,6 +18,11 @@ struct HomeView: View {
     @State private var searchTask: Task<Void, Never>?
     @State private var renaming: Session?
     @State private var newTitle = ""
+    /// The phone can't browse the Mac's disk, so a new project source is a
+    /// typed path, validated on the Mac.
+    @State private var addingFolder = false
+    @State private var newFolderPath = ""
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack {
@@ -80,6 +85,13 @@ struct HomeView: View {
             }
             .refreshable { await load() }
             .task { await load() }
+            // Returning to the app is the moment a session started
+            // elsewhere (the OpenCode CLI on the Mac) should already be in
+            // the list, without knowing to pull down.
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                Task { await load() }
+            }
             .alert("Rename session", isPresented: Binding(
                 get: { renaming != nil },
                 set: { if !$0 { renaming = nil } }
@@ -87,6 +99,19 @@ struct HomeView: View {
                 TextField("Title", text: $newTitle)
                 Button("Cancel", role: .cancel) { renaming = nil }
                 Button("Save") { if let s = renaming { rename(s, to: newTitle) } }
+            }
+            .alert("Add a folder on your Mac", isPresented: $addingFolder) {
+                TextField("~/path/to/project", text: $newFolderPath)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("Cancel", role: .cancel) { addingFolder = false }
+                Button("Add") {
+                    let path = newFolderPath
+                    newFolderPath = ""
+                    addFolder(path)
+                }
+            } message: {
+                Text("The full path of the folder, as your Mac sees it. It becomes a project you can start sessions in.")
             }
         }
     }
@@ -151,7 +176,7 @@ struct HomeView: View {
     /// conversation, not a place to start one.
     @ViewBuilder
     private var projectSection: some View {
-        if !projects.isEmpty, search.isEmpty {
+        if search.isEmpty {
             Section("Projects") {
                 ForEach(projects) { project in
                     NavigationLink(value: Destination.project(project)) {
@@ -171,6 +196,46 @@ struct HomeView: View {
                             }
                         }
                     }
+                    .swipeActions(edge: .trailing) {
+                        // Only folders the user pinned by hand: known
+                        // projects are OpenCode's history, and discovered
+                        // repos would just be found again.
+                        if project.added == true {
+                            Button(role: .destructive) { removeFolder(project) } label: {
+                                Label("Remove", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+                Button {
+                    addingFolder = true
+                } label: {
+                    Label("Add Folder…", systemImage: "plus")
+                        .foregroundStyle(Color.inkMuted)
+                }
+            }
+        }
+    }
+
+    /// Both edits answer with the merged project list, so the phone shows
+    /// exactly what the Mac decided, never its own guess.
+    private func addFolder(_ path: String) {
+        sendFolderEdit(kind: "project.add", path: path)
+    }
+
+    private func removeFolder(_ project: Project) {
+        sendFolderEdit(kind: "project.remove", path: project.worktree)
+    }
+
+    private func sendFolderEdit(kind: String, path: String) {
+        var request = Wire.Request(kind: kind)
+        request.project = path
+        Task {
+            for await event in CompanionLink().run(request) {
+                switch event.kind {
+                case "projects": projects = event.projects ?? []
+                case "failed": error = event.text
+                default: break
                 }
             }
         }
