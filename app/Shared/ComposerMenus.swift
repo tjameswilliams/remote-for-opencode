@@ -125,6 +125,66 @@ struct AgentMenu: View {
     }
 }
 
+/// Which MCP servers' tools this conversation exposes: one switch per
+/// server. Only rendered when the user's OpenCode has MCP servers at all,
+/// so the composer stays uncluttered for everyone else. Tinted while
+/// filtered, because a conversation missing tools it usually has is worth
+/// saying out loud.
+struct McpMenu: View {
+    @ObservedObject var mcp: McpStore
+
+    var body: some View {
+        Menu {
+            if let error = mcp.error {
+                Section(error) {
+                    Button {
+                        Task { await mcp.load() }
+                    } label: {
+                        Label("Try again", systemImage: "arrow.clockwise")
+                    }
+                }
+            }
+            ForEach(mcp.servers) { server in
+                Button {
+                    mcp.toggle(server)
+                } label: {
+                    // A configured-but-unreachable server would do nothing
+                    // switched on; say so where the switch is.
+                    let name = server.connected ? server.name : "\(server.name) (offline)"
+                    if server.enabled {
+                        Label(name, systemImage: "checkmark")
+                    } else {
+                        Text(name)
+                    }
+                }
+            }
+            if mcp.servers.count > 1 {
+                Divider()
+                Button("All On") { mcp.setAll(true) }
+                Button("All Off") { mcp.setAll(false) }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "wrench.and.screwdriver")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(mcp.label).lineLimit(1)
+            }
+            .font(.subheadline)
+            .foregroundStyle(mcp.filtered ? Color.clay : Color.primary)
+            .padding(.horizontal, 12)
+            .frame(height: 36)
+            .background(
+                Capsule().fill(mcp.filtered
+                    ? Color.clay.opacity(0.15) : Color.primary.opacity(0.08))
+            )
+        }
+        .tint(.primary)
+        .accessibilityLabel(
+            "Tools: \(mcp.enabledCount) of \(mcp.servers.count) MCP servers on. Tap to change."
+        )
+    }
+}
+
 /// A 36pt circular control — comfortably tappable, visually weighted to
 /// match the field it sits under.
 struct CircleButton: View {

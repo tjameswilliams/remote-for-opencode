@@ -16,6 +16,7 @@ struct Composer: View {
     @ObservedObject var attachments: PromptAttachments
     @ObservedObject var models: ModelStore
     @ObservedObject var agents: AgentStore
+    @ObservedObject var mcp: McpStore
     let onDictate: () -> Void
     let onSend: () -> Void
 
@@ -54,6 +55,9 @@ struct Composer: View {
                 ModelMenu(models: models)
                 if !agents.agents.isEmpty {
                     AgentMenu(agents: agents)
+                }
+                if mcp.configured {
+                    McpMenu(mcp: mcp)
                 }
                 Spacer(minLength: 4)
                 if !dictation.unavailable {

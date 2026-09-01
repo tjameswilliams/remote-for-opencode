@@ -326,6 +326,15 @@ private final class Connection {
                 e.defaultModel = defaultID
                 return [e]
             }
+        case "mcp":
+            answer {
+                guard let directory = request.project else { return [] }
+                var e = Wire.Event(kind: "mcp")
+                e.mcp = try await adapter.mcpServers(
+                    directory: directory, sessionID: request.session
+                )
+                return [e]
+            }
         case "prompt":
             servePrompt(request, adapter: adapter)
         case "watch":
@@ -385,6 +394,17 @@ private final class Connection {
                 diff.diffs = try await adapter.turnDiffs(sessionID: session, directory: directory)
                 diff.session = session
                 events.append(diff)
+                // The context meter's starting point: without this, an
+                // opened session shows nothing until the next turn moves
+                // the numbers.
+                if let usage = try? await adapter.sessionUsage(
+                    sessionID: session, directory: directory
+                ) {
+                    var e = Wire.Event(kind: "usage")
+                    e.usage = usage
+                    e.session = session
+                    events.append(e)
+                }
                 return events
             }
         default:
@@ -555,6 +575,17 @@ enum TurnRunner {
             var opened = Wire.Event(kind: "status")
             opened.session = sessionID
             emit(opened)
+
+            // The conversation's MCP switches become the session's rules
+            // before anything is invoked. On the session rather than the
+            // prompt body because command turns have no tools field, and
+            // because the session persisting them is what lets a thread
+            // configured here keep its toolset in the TUI.
+            if let servers = request.mcp {
+                try await adapter.setMcp(
+                    sessionID: sessionID, directory: directory, servers: servers
+                )
+            }
 
             var providerID = request.providerID
             var modelID = request.modelID
@@ -732,6 +763,15 @@ enum TurnRunner {
         // live typing; the flush at idle guarantees nothing is lost.
         var lastEmit: [String: Date] = [:]
         let minimumInterval: TimeInterval = 0.1
+        // The session's token totals as last sent. `session.updated` also
+        // fires for titles and timestamps, and LiveTurns buffers every
+        // event for replay — so usage goes out only when the numbers
+        // actually moved, which is roughly once per model step.
+        var lastUsage: TurnUsage?
+        // Context windows per "provider/model", fetched once per pump on
+        // the first usage and cached: the catalog doesn't change under a
+        // running turn.
+        var contextLimits: [String: Int]?
 
         func emitPart(_ partID: String, force: Bool) {
             guard let kind = partType[partID],
@@ -763,6 +803,28 @@ enum TurnRunner {
                    let id = info["id"] as? String, let role = info["role"] as? String {
                     roles[id] = role
                 }
+            case "session.created", "session.updated":
+                // The session record carries the running token totals and
+                // accumulated cost — how full the model's context is, the
+                // number that tells a user when to /summarize.
+                guard let info = properties["info"] as? [String: Any],
+                      info["id"] as? String == sessionID,
+                      var usage = OpenCodeAdapter.usage(from: info)
+                else { continue }
+                if let model = info["model"] as? [String: Any],
+                   let providerID = model["providerID"] as? String,
+                   let modelID = model["id"] as? String {
+                    if contextLimits == nil {
+                        contextLimits = (try? await adapter.contextLimits()) ?? [:]
+                    }
+                    usage.contextLimit = contextLimits?["\(providerID)/\(modelID)"]
+                }
+                guard usage != lastUsage else { continue }
+                lastUsage = usage
+                var e = Wire.Event(kind: "usage")
+                e.usage = usage
+                e.session = sessionID
+                emit(e)
             case "message.part.updated":
                 guard let part = properties["part"] as? [String: Any],
                       part["sessionID"] as? String == sessionID

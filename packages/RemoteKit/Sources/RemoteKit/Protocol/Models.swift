@@ -279,6 +279,38 @@ public struct AgentModel: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
+/// One MCP server configured in the user's OpenCode, and whether this
+/// conversation exposes its tools to the model.
+///
+/// Every connected server's tools ride along on every turn, and a couple
+/// of chatty servers can crowd the context before the user has said a
+/// word. `enabled` is per conversation: the durable truth lives in the
+/// session's permission rules on the Mac, so the same conversation shows
+/// the same switches on every device.
+public struct McpServer: Codable, Hashable, Identifiable, Sendable {
+    /// The server's name as configured ("sentry", "github"), also the key
+    /// a prompt's `mcp` map uses.
+    public var name: String
+    /// "connected" | "failed" | "disabled" | "needs_auth" | …. Worth
+    /// showing: a switched-on server that failed to start explains why its
+    /// tools aren't doing anything.
+    public var status: String?
+    /// Whether this conversation's session exposes the server's tools.
+    public var enabled: Bool
+
+    public var id: String { name }
+
+    public init(name: String, status: String? = nil, enabled: Bool = true) {
+        self.name = name
+        self.status = status
+        self.enabled = enabled
+    }
+
+    /// False when the server is configured but not answering; its tools
+    /// wouldn't work even switched on.
+    public var connected: Bool { status == nil || status == "connected" }
+}
+
 /// The agent is asking the user something — distinct from a permission:
 /// there's nothing to allow, just a decision only the user can make.
 public struct QuestionRequest: Codable, Hashable, Identifiable, Sendable {
@@ -343,6 +375,52 @@ public struct FileDiff: Codable, Hashable, Sendable {
         self.additions = additions
         self.deletions = deletions
         self.status = status
+    }
+}
+
+/// The session's token accounting, as OpenCode reports it. Each turn's
+/// input covers the whole conversation, so these numbers read as "how much
+/// of the model's context window this thread now occupies" — the number
+/// that says when to /summarize. Cost is the session's accumulated total.
+/// Sent as `usage` events whenever the numbers change, and once on a
+/// transcript load.
+public struct TurnUsage: Codable, Equatable, Sendable {
+    public var input: Int?
+    public var output: Int?
+    public var reasoning: Int?
+    public var cacheRead: Int?
+    public var cacheWrite: Int?
+    /// Dollars, accumulated across the session.
+    public var cost: Double?
+    /// The context window of the model the session is running, resolved on
+    /// the Mac — the client can't always name the model (a default-model
+    /// prompt never learns which one the Mac picked).
+    public var contextLimit: Int?
+
+    public init(
+        input: Int? = nil, output: Int? = nil, reasoning: Int? = nil,
+        cacheRead: Int? = nil, cacheWrite: Int? = nil,
+        cost: Double? = nil, contextLimit: Int? = nil
+    ) {
+        self.input = input
+        self.output = output
+        self.reasoning = reasoning
+        self.cacheRead = cacheRead
+        self.cacheWrite = cacheWrite
+        self.cost = cost
+        self.contextLimit = contextLimit
+    }
+
+    /// Everything occupying the window right now.
+    public var total: Int {
+        (input ?? 0) + (output ?? 0) + (reasoning ?? 0)
+            + (cacheRead ?? 0) + (cacheWrite ?? 0)
+    }
+
+    /// 0…1 of the window used, when the window is known.
+    public var fraction: Double? {
+        guard let contextLimit, contextLimit > 0, total > 0 else { return nil }
+        return min(1, Double(total) / Double(contextLimit))
     }
 }
 

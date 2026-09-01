@@ -12,6 +12,7 @@ struct DesktopComposer: View {
     @ObservedObject var attachments: PromptAttachments
     @ObservedObject var models: ModelStore
     @ObservedObject var agents: AgentStore
+    @ObservedObject var mcp: McpStore
     let onSend: () -> Void
     let onAbort: () -> Void
 
@@ -49,6 +50,9 @@ struct DesktopComposer: View {
                 ModelMenu(models: models)
                 if !agents.agents.isEmpty {
                     AgentMenu(agents: agents)
+                }
+                if mcp.configured {
+                    McpMenu(mcp: mcp)
                 }
                 Spacer(minLength: 4)
                 CircleButton(

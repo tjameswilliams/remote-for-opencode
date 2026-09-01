@@ -16,6 +16,8 @@ struct Transcript: View {
     let activity: String
     var turnStartedAt: Date = .init()
     var todos: [TodoItem] = []
+    /// The session's context occupancy, when the Mac has reported it.
+    var usage: TurnUsage?
 
     private static let indicatorID = "working"
     @ScaledMetric(relativeTo: .body) private var betweenParts: CGFloat = 12
@@ -47,8 +49,19 @@ struct Transcript: View {
                             .padding(.top, betweenParts)
                     }
                     if running {
-                        WorkingIndicator(activity: activity, since: turnStartedAt)
-                            .id(Self.indicatorID)
+                        HStack(spacing: 8) {
+                            WorkingIndicator(activity: activity, since: turnStartedAt)
+                            Spacer(minLength: 8)
+                            if let usage { UsageBadge(usage: usage) }
+                        }
+                        .id(Self.indicatorID)
+                        .padding(.top, betweenParts)
+                    } else if let usage, !rows.isEmpty {
+                        // The settled reading, kept where the indicator
+                        // was: how full the window is going into the next
+                        // turn.
+                        UsageBadge(usage: usage)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
                             .padding(.top, betweenParts)
                     }
                 }

@@ -28,6 +28,10 @@ final class TurnController: ObservableObject {
     /// When the running turn began — the working indicator escalates its
     /// wording against this.
     @Published private(set) var turnStartedAt = Date()
+    /// How full the model's context window is, per the last `usage` event.
+    /// A session total, so it survives across turns rather than resetting
+    /// with the send.
+    @Published private(set) var usage: TurnUsage?
 
     /// The in-flight turn: its client-minted id and how many of its events
     /// arrived — exactly what `resume` needs.
@@ -73,7 +77,8 @@ final class TurnController: ObservableObject {
         attachments: PromptAttachments,
         model: AgentModel?,
         agent: String?,
-        knownCommands: [AgentCommand]
+        knownCommands: [AgentCommand],
+        mcp: [String: Bool]? = nil
     ) {
         guard !running else { return }
         // Files alone are a legitimate prompt ("look at this"), but the
@@ -111,6 +116,8 @@ final class TurnController: ObservableObject {
         request.modelID = model?.modelID
         // Absent means OpenCode's own default (build).
         request.agent = agent
+        // Absent means "leave the session's tool rules alone".
+        request.mcp = mcp
         let id = UUID().uuidString
         request.turn = id
         turnID = id
@@ -163,6 +170,8 @@ final class TurnController: ObservableObject {
                 diffs = event.diffs ?? []
             case "todos":
                 todos = event.todos ?? []
+            case "usage":
+                if let usage = event.usage { self.usage = usage }
             case "idle", "done":
                 if event.kind == "done" { running = false; turnID = nil }
             case "failed":
@@ -260,6 +269,8 @@ final class TurnController: ObservableObject {
             todos = event.todos ?? []
         case "diff":
             diffs = event.diffs ?? []
+        case "usage":
+            if let usage = event.usage { self.usage = usage }
         case "permission":
             // Nil payload means the ask was answered somewhere else — the
             // TUI, another device — and the card comes down.
@@ -320,6 +331,7 @@ final class TurnController: ObservableObject {
             switch event.kind {
             case "part": if let part = event.part { upsert(part) }
             case "diff": diffs = event.diffs ?? []
+            case "usage": if let usage = event.usage { self.usage = usage }
             case "failed": error = event.text
             default: break
             }

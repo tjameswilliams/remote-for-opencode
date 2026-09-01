@@ -11,6 +11,9 @@ struct WorkspaceSessionView: View {
     let title: String
 
     @StateObject private var turn: TurnController
+    /// Per conversation, unlike the window's stores: which MCP servers
+    /// this thread exposes is the thread's own property.
+    @StateObject private var mcp: McpStore
     @State private var input = ""
     @StateObject private var attachments = PromptAttachments()
     /// What the inspector's badge and the Dock count: asks waiting on you.
@@ -22,6 +25,9 @@ struct WorkspaceSessionView: View {
         self.state = state
         self.title = title
         _turn = StateObject(wrappedValue: TurnController(
+            project: project, session: session, makeLink: state.makeLink
+        ))
+        _mcp = StateObject(wrappedValue: McpStore(
             project: project, session: session, makeLink: state.makeLink
         ))
     }
@@ -38,7 +44,7 @@ struct WorkspaceSessionView: View {
                 rows: turn.rows, diffs: turn.diffs, error: turn.error,
                 running: turn.running, activity: turn.activity,
                 turnStartedAt: turn.turnStartedAt,
-                todos: turn.todos
+                todos: turn.todos, usage: turn.usage
             )
             .frame(maxWidth: 640)
             .frame(maxWidth: .infinity)
@@ -74,6 +80,7 @@ struct WorkspaceSessionView: View {
                 attachments: attachments,
                 models: state.models,
                 agents: state.agents,
+                mcp: mcp,
                 onSend: send,
                 onAbort: { turn.abort() }
             )
@@ -87,6 +94,14 @@ struct WorkspaceSessionView: View {
                 .inspectorColumnWidth(min: 300, ideal: 380, max: 760)
         }
         .toolbar {
+            ToolbarItem {
+                // Always visible, unlike the transcript's copy, which
+                // scrolls: the context meter is what you glance at before
+                // deciding to /summarize.
+                if let usage = turn.usage {
+                    UsageBadge(usage: usage)
+                }
+            }
             ToolbarItem {
                 if turn.running {
                     // The transcript's working indicator anchors autoscroll;
@@ -152,6 +167,7 @@ struct WorkspaceSessionView: View {
             turn.watch()
             await turn.loadTranscript()
         }
+        .task { await mcp.loadIfNeeded() }
     }
 
     private func send() {
@@ -163,7 +179,8 @@ struct WorkspaceSessionView: View {
             attachments: attachments,
             model: state.models.selected,
             agent: state.agents.selected?.name,
-            knownCommands: state.commands.commands
+            knownCommands: state.commands.commands,
+            mcp: mcp.wireMap
         )
     }
 }

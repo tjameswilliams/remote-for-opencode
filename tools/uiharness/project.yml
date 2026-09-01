@@ -36,9 +36,11 @@ targets:
       - path: ../../app/Shared/AgentStore.swift
       - path: ../../app/Shared/TodoList.swift
       - path: ../../app/Shared/Transcript.swift
+      - path: ../../app/Shared/UsageBadge.swift
       - path: ../../app/Shared/ReasoningBlock.swift
       - path: ../../app/Shared/PromptAttachments.swift
       - path: ../../app/Shared/ModelStore.swift
+      - path: ../../app/Shared/McpStore.swift
     info:
       path: Harness/Info.plist
       properties:

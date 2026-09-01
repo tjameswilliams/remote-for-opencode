@@ -34,9 +34,10 @@ public enum Wire {
     /// fields are that operation's arguments, all optional so unknown or
     /// missing ones decode cleanly across app versions.
     public struct Request: Codable {
-        /// "status" | "projects" | "sessions" | "models" | "prompt" |
-        /// "resume" | "abort" | "permission" | "question" | "pending" |
-        /// "transcript" | "project.add" | "project.remove" | "watch"
+        /// "status" | "projects" | "sessions" | "models" | "mcp" |
+        /// "prompt" | "resume" | "abort" | "permission" | "question" |
+        /// "pending" | "transcript" | "project.add" | "project.remove" |
+        /// "watch"
         ///
         /// "watch" (session + project) is the one subscription: the Mac
         /// relays the session's live events — parts, todos, diffs,
@@ -89,6 +90,13 @@ public enum Wire {
         /// sessions: filter server-side rather than shipping everything and
         /// filtering on the phone — the session list can be thousands long.
         public var search: String?
+        /// prompt: which MCP servers' tools this conversation exposes,
+        /// keyed by server name; always the complete set, so the session's
+        /// rules on the Mac become exactly this map. Absent when the
+        /// conversation has nothing to say (never touched, nothing off),
+        /// which is what keeps an oblivious client from erasing rules
+        /// another one set. "mcp" (list) answers with the same names.
+        public var mcp: [String: Bool]?
 
         public init(kind: String) { self.kind = kind }
     }
@@ -149,12 +157,19 @@ public enum Wire {
         public var todos: [TodoItem]?
         /// On `changes`: the working tree's accumulated state.
         public var changes: WorkingChanges?
+        /// On `mcp`: the MCP servers this OpenCode configures, with their
+        /// status and, when the request named a session, whether that
+        /// session exposes each one's tools.
+        public var mcp: [McpServer]?
         /// On `models`: what this Mac's OpenCode is configured to run.
         public var models: [AgentModel]?
         /// On `models`: the one used when the phone doesn't pick.
         public var defaultModel: String?
         /// On `diff`: what the turn changed.
         public var diffs: [FileDiff]?
+        /// On `usage`: how much of the model's context window the session
+        /// occupies, and what it has cost so far.
+        public var usage: TurnUsage?
         /// On `status` and `part`: which OpenCode session this concerns —
         /// also how a `prompt` learns the id of the session it created.
         public var session: String?

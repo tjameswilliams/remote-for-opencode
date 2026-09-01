@@ -180,6 +180,28 @@ struct OpenCodeAdapter {
         return (out, usable)
     }
 
+    /// Context windows for every configured model ("provider/model" →
+    /// tokens), from the same catalog `models()` reads (`limit.context`).
+    /// The denominator for a client's context meter; callers cache, since
+    /// the catalog doesn't change under a running turn.
+    func contextLimits() async throws -> [String: Int] {
+        let json = try await get("/config/providers") as? [String: Any] ?? [:]
+        var out: [String: Int] = [:]
+        for provider in json["providers"] as? [[String: Any]] ?? [] {
+            guard let providerID = provider["id"] as? String,
+                  let models = provider["models"] as? [String: Any]
+            else { continue }
+            for (modelID, value) in models {
+                guard let model = value as? [String: Any],
+                      let limit = (model["limit"] as? [String: Any])?["context"] as? Int,
+                      limit > 0
+                else { continue }
+                out["\(providerID)/\(modelID)"] = limit
+            }
+        }
+        return out
+    }
+
     /// Session operations OpenCode exposes as endpoints rather than as
     /// commands.
     ///
@@ -341,6 +363,72 @@ struct OpenCodeAdapter {
             )
         }
         .sorted { $0.name < $1.name }
+    }
+
+    // MARK: - v1: MCP servers
+
+    /// OpenCode names an MCP tool `<server>_<tool>`, squashing anything
+    /// outside [a-zA-Z0-9_-] in either half to "_" (their
+    /// McpCatalog.sanitize). Rules that hide a server's tools must match
+    /// that spelling, not the raw config key.
+    static func sanitizedMcp(_ name: String) -> String {
+        String(name.unicodeScalars.map { scalar -> Character in
+            switch scalar {
+            case "a" ... "z", "A" ... "Z", "0" ... "9", "-", "_": return Character(scalar)
+            default: return "_"
+            }
+        })
+    }
+
+    /// The MCP servers this OpenCode configures, and, when a session is
+    /// named, whether that session exposes each one's tools.
+    ///
+    /// Enablement is read from the session's own permission rules, because
+    /// that is where `setMcp` puts it: the session is the durable truth,
+    /// so every client shows the same switches and a fresh conversation
+    /// starts with everything on.
+    func mcpServers(directory: String, sessionID: String?) async throws -> [McpServer] {
+        let status = try await get("/mcp", directory: directory) as? [String: Any] ?? [:]
+        var denied = Set<String>()
+        if let sessionID {
+            let session = try await get(
+                "/session/\(sessionID)", directory: directory
+            ) as? [String: Any] ?? [:]
+            let rules = session["permission"] as? [[String: Any]] ?? []
+            for rule in rules
+                where rule["action"] as? String == "deny" && rule["pattern"] as? String == "*" {
+                if let permission = rule["permission"] as? String, permission.hasSuffix("_*") {
+                    denied.insert(String(permission.dropLast(2)))
+                }
+            }
+        }
+        return status.map { name, value in
+            McpServer(
+                name: name,
+                status: (value as? [String: Any])?["status"] as? String,
+                enabled: !denied.contains(Self.sanitizedMcp(name))
+            )
+        }
+        .sorted { $0.name < $1.name }
+    }
+
+    /// Make the session's tool exposure exactly `servers`: one wildcard
+    /// deny rule per switched-off server, nothing for the rest. A denied
+    /// server's tools aren't merely blocked: OpenCode drops them from
+    /// what the model sees, which is the decluttering the toggle promises
+    /// (verified live against 1.18.15).
+    ///
+    /// PATCH replaces the session's whole ruleset. That is the intended
+    /// semantics (the map is the complete truth), and it mirrors what
+    /// OpenCode itself does when a prompt carries a `tools` map.
+    func setMcp(sessionID: String, directory: String, servers: [String: Bool]) async throws {
+        let rules = servers.filter { !$0.value }.keys.sorted().map { name in
+            ["permission": Self.sanitizedMcp(name) + "_*", "pattern": "*", "action": "deny"]
+        }
+        try await request(
+            "/session/\(sessionID)", method: "PATCH", directory: directory,
+            body: ["permission": rules]
+        )
     }
 
     func todos(sessionID: String, directory: String) async throws -> [TodoItem] {
@@ -561,6 +649,22 @@ struct OpenCodeAdapter {
         }
     }
 
+    /// The session's running token totals for a cold load — the same
+    /// numbers `session.updated` streams live, read from the session
+    /// record itself. Nil while the session has never run a step.
+    func sessionUsage(sessionID: String, directory: String) async throws -> TurnUsage? {
+        let info = try await get(
+            "/session/\(sessionID)", directory: directory
+        ) as? [String: Any] ?? [:]
+        guard var usage = Self.usage(from: info) else { return nil }
+        if let model = info["model"] as? [String: Any],
+           let providerID = model["providerID"] as? String,
+           let modelID = model["id"] as? String {
+            usage.contextLimit = (try? await contextLimits())?["\(providerID)/\(modelID)"]
+        }
+        return usage
+    }
+
     // MARK: - v1: event stream
 
     /// The instance's SSE feed as parsed dictionaries. One subscription per
@@ -632,6 +736,25 @@ struct OpenCodeAdapter {
         }
         guard !items.isEmpty else { return nil }
         return QuestionRequest(id: id, sessionID: body["sessionID"] as? String, questions: items)
+    }
+
+    /// A session record's token accounting (`tokens` + `cost`, as carried
+    /// on `session.created`/`session.updated` and on `GET /session/{id}`)
+    /// → the phone's TurnUsage. Nil until something has actually run: the
+    /// all-zero record a fresh session carries means nothing yet, not
+    /// "the context is empty".
+    static func usage(from info: [String: Any]) -> TurnUsage? {
+        guard let tokens = info["tokens"] as? [String: Any] else { return nil }
+        let cache = tokens["cache"] as? [String: Any]
+        let usage = TurnUsage(
+            input: tokens["input"] as? Int,
+            output: tokens["output"] as? Int,
+            reasoning: tokens["reasoning"] as? Int,
+            cacheRead: cache?["read"] as? Int,
+            cacheWrite: cache?["write"] as? Int,
+            cost: info["cost"] as? Double
+        )
+        return usage.total > 0 ? usage : nil
     }
 
     /// A preview may not cost more than this on the wire. Chosen to hold a

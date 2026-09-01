@@ -19,6 +19,7 @@ struct HarnessApp: App {
 struct HarnessView: View {
     @StateObject private var models = ModelStore.shared
     @StateObject private var agents = AgentStore.shared
+    @StateObject private var mcp = McpStore(project: "/tmp/harness", session: nil)
     @StateObject private var attachments = PromptAttachments()
     @StateObject private var dictation = Dictation()
     @State private var input = ""
@@ -42,6 +43,7 @@ struct HarnessView: View {
         .task {
             models.mockForHarness()
             agents.mockForHarness(plan: scene == 4)
+            mcp.mockForHarness()
         }
     }
 
@@ -68,7 +70,11 @@ struct HarnessView: View {
                 diffs: [.init(file: "Sources/Auth/TokenStore.swift", additions: 18, deletions: 6, status: "modified")],
                 error: nil, running: true, activity: "Running the test suite",
                 turnStartedAt: Date().addingTimeInterval(-14),
-                todos: Content.todos
+                todos: Content.todos,
+                usage: .init(
+                    input: 31_400, output: 2_800, cacheRead: 9_100,
+                    cost: 0.34, contextLimit: 200_000
+                )
             )
             composer
         }
@@ -119,7 +125,7 @@ struct HarnessView: View {
         Composer(
             input: $input, running: scene == 0 || scene == 1,
             dictation: dictation, attachments: attachments,
-            models: models, agents: agents,
+            models: models, agents: agents, mcp: mcp,
             onDictate: {}, onSend: {}
         )
     }

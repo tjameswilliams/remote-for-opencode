@@ -17,6 +17,9 @@ struct SessionView: View {
     @ObservedObject private var models = ModelStore.shared
     @ObservedObject private var commands = CommandStore.shared
     @ObservedObject private var agents = AgentStore.shared
+    /// Per conversation, unlike the stores above: which MCP servers this
+    /// thread exposes is the thread's own property.
+    @StateObject private var mcp: McpStore
     @State private var showingChanges = false
     @StateObject private var attachments = PromptAttachments()
     /// What was typed before dictation started, so speech appends to it
@@ -26,6 +29,7 @@ struct SessionView: View {
     init(project: String, session: String?, title: String) {
         self.title = title
         _turn = StateObject(wrappedValue: TurnController(project: project, session: session))
+        _mcp = StateObject(wrappedValue: McpStore(project: project, session: session))
     }
 
     /// Commands to offer right now, or nil when the user isn't typing one.
@@ -40,7 +44,7 @@ struct SessionView: View {
                 rows: turn.rows, diffs: turn.diffs, error: turn.error,
                 running: turn.running, activity: turn.activity,
                 turnStartedAt: turn.turnStartedAt,
-                todos: turn.todos
+                todos: turn.todos, usage: turn.usage
             )
             if let matches = paletteMatches {
                 CommandPalette(commands: matches) { command in
@@ -56,6 +60,7 @@ struct SessionView: View {
                 attachments: attachments,
                 models: models,
                 agents: agents,
+                mcp: mcp,
                 onDictate: {
                     if !dictation.recording { typedBeforeDictation = input }
                     dictation.toggle()
@@ -101,6 +106,7 @@ struct SessionView: View {
         .task { await models.loadIfNeeded() }
         .task { await commands.loadIfNeeded() }
         .task { await agents.loadIfNeeded() }
+        .task { await mcp.loadIfNeeded() }
         .animation(.easeOut(duration: 0.15), value: paletteMatches?.count)
         .onChange(of: scenePhase) {
             turn.active = scenePhase == .active
@@ -145,7 +151,8 @@ struct SessionView: View {
             attachments: attachments,
             model: models.selected,
             agent: agents.selected?.name,
-            knownCommands: commands.commands
+            knownCommands: commands.commands,
+            mcp: mcp.wireMap
         )
     }
 }

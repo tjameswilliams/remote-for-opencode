@@ -135,6 +135,34 @@ hang forever.
 request. Its rows are already `FileDiff`-shaped
 (`{file, patch, additions, deletions, status}`). All verified live.
 
+### `mcp`: per-conversation MCP tool toggles
+- `{kind: "mcp", project, session?}` → one event
+  `{kind: "mcp", mcp: [{name, status, enabled}]}`. Servers from
+  `GET /mcp?directory=…` (name → `{status}`); `enabled` is read from the
+  named session's permission ruleset (`GET /session/{id}`), so the session
+  is the durable truth and every client shows the same switches. No
+  session (a fresh conversation) means everything `enabled`.
+- prompt `mcp: {name: bool}`: the complete map, keyed by server name. The
+  Mac applies it with `PATCH /session/{id} {permission: [...]}` after
+  ensuring the session and before invoking anything: one wildcard rule
+  `{permission: "<server>_*", pattern: "*", action: "deny"}` per
+  switched-off server, nothing for the rest.
+- Why PATCH rather than `prompt_async`'s own `tools` field: `POST
+  /session/{id}/command` has no such field, and the session keeping the
+  rules is what lets a thread configured from the phone keep its toolset
+  in the TUI. OpenCode does the same replacement itself when a prompt
+  carries `tools`, so the semantics match.
+- Tool names are `<server>_<tool>` with both halves sanitized
+  (`[^a-zA-Z0-9_-]` → `_`, their `McpCatalog.sanitize`); the rules must
+  use the sanitized spelling. A denied server's tools are **removed from
+  what the model sees** (`Permission.visibleTools`), not merely blocked,
+  which is the point: context decluttering, not access control.
+- Clients only send `mcp` when the conversation has something to say
+  (user touched the switches, or loaded rules say something is off), so a
+  client that never opened the menu can't erase rules another one set.
+  All verified live against 1.18.15, including that the model's visible
+  tool list shrinks (48 → 14 with four servers denied).
+
 ### `watch` — live view of a session this client didn't prompt
 - `{kind: "watch", session, project}` subscribes to the session's live
   events, translated exactly like a prompt turn's (same event loop on the
@@ -187,6 +215,25 @@ Two sources with different lifetimes:
   review screen's source.
 - `GET /vcs/diff` requires a `mode` query param (working-tree level; not
   needed for v1).
+
+### `usage` — context occupancy and cost
+- `session.created` / `session.updated` events carry the session record,
+  whose `info.tokens` ({input, output, reasoning, cache{read, write}})
+  and accumulated `info.cost` are the running totals. Each turn's input
+  covers the whole conversation, so the totals read as "how full is the
+  model's context window" — the number that says when to `/summarize`.
+- The pump maps them to `{kind: "usage", usage: TurnUsage}` events on
+  both prompt turns and watches, emitted only when the numbers change
+  (the same events also fire for titles and timestamps, and LiveTurns
+  buffers everything for replay). The all-zero record a fresh session
+  carries is dropped, not sent as an empty meter.
+- `usage.contextLimit` is resolved on the Mac from `GET /config/providers`
+  (`limit.context` per model, fetched once per pump), because a
+  default-model prompt means the client can't name the model it would be
+  dividing by. Clients render a raw token count when it's absent.
+- Cold load: a `transcript` answer appends one `usage` event read from
+  `GET /session/{id}` after the parts and diff, so an opened session
+  shows its meter before anything new runs.
 
 ### `resume` / transcript
 - `GET /session/{id}/message?directory=…` → full transcript:

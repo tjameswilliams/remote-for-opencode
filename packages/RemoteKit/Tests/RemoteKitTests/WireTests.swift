@@ -126,12 +126,33 @@ struct WireTests {
         request.text = "hello"
         request.agent = "plan"
         request.attachments = [Attachment(name: "a.png", mime: "image/png", data: "AAA=")]
+        request.mcp = ["sentry": true, "postgres": false]
         let decoded = try JSONDecoder().decode(
             Wire.Request.self, from: JSONEncoder().encode(request)
         )
         #expect(decoded.kind == "prompt")
         #expect(decoded.agent == "plan")
         #expect(decoded.attachments?.first?.mime == "image/png")
+        #expect(decoded.mcp == ["sentry": true, "postgres": false])
+
+        var event = Wire.Event(kind: "mcp")
+        event.mcp = [McpServer(name: "sentry", status: "connected", enabled: false)]
+        let decodedEvent = try JSONDecoder().decode(
+            Wire.Event.self, from: JSONEncoder().encode(event)
+        )
+        #expect(decodedEvent.mcp == [McpServer(name: "sentry", status: "connected", enabled: false)])
+        #expect(decodedEvent.mcp?.first?.connected == true)
+
+        var usageEvent = Wire.Event(kind: "usage")
+        usageEvent.usage = TurnUsage(
+            input: 30000, output: 2000, cacheRead: 8000, cost: 0.42, contextLimit: 200_000
+        )
+        let decodedUsage = try JSONDecoder().decode(
+            Wire.Event.self, from: JSONEncoder().encode(usageEvent)
+        )
+        #expect(decodedUsage.usage?.total == 40000)
+        #expect(decodedUsage.usage?.fraction == 0.2)
+        #expect(decodedUsage.usage?.cost == 0.42)
     }
 
     @Test("Unknown fields from a newer peer decode cleanly")

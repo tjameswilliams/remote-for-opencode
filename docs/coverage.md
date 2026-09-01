@@ -10,7 +10,7 @@ approve, and review an agent turn from a phone works. What's missing is
 mostly *around* the conversation — modes, todos, session management, and
 looking at the repo itself.
 
-## Covered (20 operations)
+## Covered (20 operations at the 2026-08-03 audit, plus MCP toggles since)
 
 | Area | Endpoints |
 |---|---|
@@ -23,6 +23,7 @@ looking at the repo itself.
 | Session ops | `summarize`, `share` (POST/DELETE), `revert`, `unrevert` |
 | Approvals | `/permission`, `/permission/{id}/reply` |
 | Questions | `/question`, `/question/{id}/reply` |
+| MCP toggles | `GET /mcp`, `GET /session/{id}` (permission ruleset), `PATCH /session/{id} {permission}` |
 
 ## Closed since this audit (2026-08-03)
 
@@ -74,7 +75,8 @@ right now rather than listing them all as inert history.
 
 ### 7. Smaller ones
 - `POST /session/{id}/fork` + `/children` — branch a conversation.
-- `GET /mcp`, `GET /lsp` — server/diagnostic status.
+- `GET /mcp`, `GET /lsp`: server/diagnostic status. (`GET /mcp` since
+  closed: it now backs the per-conversation MCP tool toggles, 2026-08-23.)
 - `POST /global/upgrade` — the companion already manages the OpenCode
   process; offering "update OpenCode" in the menu bar is a natural fit.
 - `DELETE /session/{id}/message/{id}` — surgical undo.
