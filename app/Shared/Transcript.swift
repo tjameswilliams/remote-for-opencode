@@ -85,6 +85,7 @@ struct Transcript: View {
         Group {
             if part.type == "user" {
                 Text(part.text ?? "")
+                    .textSelection(.enabled)
                     .foregroundStyle(Color.ink)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)

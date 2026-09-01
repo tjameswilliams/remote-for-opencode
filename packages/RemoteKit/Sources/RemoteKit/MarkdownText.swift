@@ -56,6 +56,35 @@ public struct MarkdownText: View {
                     .padding(.leading, CGFloat(item.depth) * 14)
                 }
             }
+        case let .table(rows, hasHeader):
+            // Same horizontal-scroll bargain as code: a wide table squeezed
+            // into a phone column becomes single-character cells, so let it
+            // keep its shape and scroll instead.
+            ScrollView(.horizontal, showsIndicators: false) {
+                Grid(alignment: .leadingFirstTextBaseline,
+                     horizontalSpacing: 16,
+                     verticalSpacing: itemSpacing) {
+                    ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
+                        GridRow {
+                            ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                                Text(Self.inline(cell))
+                                    .font(hasHeader && rowIndex == 0
+                                        ? .subheadline.weight(.semibold) : .subheadline)
+                                    .lineSpacing(bodyLineSpacing)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .fixedSize(horizontal: true, vertical: false)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.primary.opacity(0.06))
+            )
         case let .code(text):
             // Scrolls horizontally, never wraps. Fitting 80 columns on a
             // phone would need roughly a 7.5pt font — below Apple's floor
@@ -92,6 +121,9 @@ public struct MarkdownText: View {
         case heading(String, Int)
         case bullet([Item])
         case code(String)
+        /// Rows of cells; `hasHeader` when a `|---|` separator followed the
+        /// first row, which then renders bold.
+        case table(rows: [[String]], hasHeader: Bool)
     }
 
     /// Inline markdown only. `.inlineOnlyPreservingWhitespace` keeps the
@@ -110,6 +142,8 @@ public struct MarkdownText: View {
         var items: [Item] = []
         var code: [String] = []
         var inCode = false
+        var tableRows: [[String]] = []
+        var tableHasHeader = false
 
         func flushParagraph() {
             if !paragraph.isEmpty {
@@ -123,6 +157,13 @@ public struct MarkdownText: View {
                 items.removeAll()
             }
         }
+        func flushTable() {
+            if !tableRows.isEmpty {
+                blocks.append(.table(rows: tableRows, hasHeader: tableHasHeader))
+                tableRows.removeAll()
+            }
+            tableHasHeader = false
+        }
 
         for rawLine in text.components(separatedBy: .newlines) {
             let line = rawLine
@@ -134,6 +175,7 @@ public struct MarkdownText: View {
                 } else {
                     flushParagraph()
                     flushItems()
+                    flushTable()
                 }
                 inCode.toggle()
                 continue
@@ -147,6 +189,7 @@ public struct MarkdownText: View {
             if trimmed.isEmpty {
                 flushParagraph()
                 flushItems()
+                flushTable()
                 continue
             }
 
@@ -157,9 +200,26 @@ public struct MarkdownText: View {
                 if !body.isEmpty {
                     flushParagraph()
                     flushItems()
+                    flushTable()
                     blocks.append(.heading(body, hashes))
                     continue
                 }
+            }
+
+            // Table rows: `| a | b |`. The `|---|` separator after the first
+            // row marks it as a header; a stray separator anywhere else is
+            // kept as data rather than guessed at.
+            if trimmed.hasPrefix("|"), trimmed.dropFirst().contains("|") {
+                flushParagraph()
+                flushItems()
+                let cells = tableCells(trimmed)
+                if tableRows.count == 1, !tableHasHeader,
+                   cells.allSatisfy({ !$0.isEmpty && $0.allSatisfy { "-:".contains($0) } }) {
+                    tableHasHeader = true
+                } else {
+                    tableRows.append(cells)
+                }
+                continue
             }
 
             // Indent depth from the raw line (2 spaces per level).
@@ -171,6 +231,7 @@ public struct MarkdownText: View {
                trimmed.dropFirst().first == " " {
                 let body = trimmed.dropFirst().trimmingCharacters(in: .whitespaces)
                 flushParagraph()
+                flushTable()
                 items.append(Item(marker: "•", text: body, depth: depth))
                 continue
             }
@@ -185,17 +246,30 @@ public struct MarkdownText: View {
                 let body = trimmed[trimmed.index(after: dot)...]
                     .trimmingCharacters(in: .whitespaces)
                 flushParagraph()
+                flushTable()
                 items.append(Item(marker: "\(number).", text: body, depth: depth))
                 continue
             }
 
             flushItems()
+            flushTable()
             paragraph.append(trimmed)
         }
 
         if inCode, !code.isEmpty { blocks.append(.code(code.joined(separator: "\n"))) }
         flushParagraph()
         flushItems()
+        flushTable()
         return blocks
+    }
+
+    /// Cells of one `| a | b |` line: split on pipes, shed the empty ends
+    /// the outer pipes leave behind, trim the rest.
+    static func tableCells(_ line: String) -> [String] {
+        var cells = line.split(separator: "|", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        if cells.first?.isEmpty == true { cells.removeFirst() }
+        if cells.last?.isEmpty == true { cells.removeLast() }
+        return cells
     }
 }
