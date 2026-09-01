@@ -18,7 +18,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REPO="$(cd "$ROOT/.." && pwd)"
 DMG="${REMOTE_DMG:-$REPO/dist/RemoteForOpenCode.dmg}"
 export SITE_DOMAIN="${SITE_DOMAIN:-remoteforopencode.com}"
-export LEGACY_SITE_DOMAIN="${LEGACY_SITE_DOMAIN:-}"
+# Default, not opt-in: pre-rename 1.0 installs poll goforopencode.com for
+# their Sparkle feed forever, so a plain deploy must keep the alias. A
+# deploy without it (2026-09-01) deleted the legacy records and cert and
+# had to be re-run; empty this only if that domain is ever truly retired.
+export LEGACY_SITE_DOMAIN="${LEGACY_SITE_DOMAIN:-goforopencode.com}"
 
 echo "==> Building site"
 (cd "$ROOT" && npm run build)
