@@ -114,5 +114,29 @@ bookkeeping — Sparkle compares that to decide what's newer.
 
 ## The phone
 
-App Store, via Xcode's organizer or fastlane later. The iOS app has no
-Sparkle equivalent and needs none.
+App Store, driven from the command line (no organizer, no fastlane). The
+iOS app has no Sparkle equivalent and needs none. Stamp
+`MARKETING_VERSION` and bump `CURRENT_PROJECT_VERSION` in `app/project.yml`
+first (the build number is monotonic across trains and can never be
+reused), then:
+
+```sh
+B=build/phone-1.3   # ExportOptions.plist (destination export) and
+                    # UploadOptions.plist (destination upload) live here;
+                    # copy them forward from the previous release's folder
+xcodebuild archive -project app/RemoteForOpenCode.xcodeproj -scheme Phone \
+  -configuration Release -destination "generic/platform=iOS" \
+  -archivePath $B/Phone.xcarchive -allowProvisioningUpdates
+xcodebuild -exportArchive -archivePath $B/Phone.xcarchive \
+  -exportOptionsPlist $B/ExportOptions.plist -exportPath $B/export
+xcodebuild -exportArchive -archivePath $B/Phone.xcarchive \
+  -exportOptionsPlist $B/UploadOptions.plist -exportPath $B/upload
+```
+
+Check `$B/export/DistributionSummary.plist` for `aps-environment:
+production` and `icloud-container-environment: Production` before the
+upload; the export is the only place those values are honest. The upload
+appears in TestFlight > Build Uploads within a couple of minutes. Then in
+App Store Connect: new version, What's New, promotional text, Notes (keep
+the demo-video paragraph, see app-store.md), attach the build, pick the
+release option, Add for Review, Submit.
