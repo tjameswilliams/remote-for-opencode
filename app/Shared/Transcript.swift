@@ -18,6 +18,10 @@ struct Transcript: View {
     var todos: [TodoItem] = []
     /// The session's context occupancy, when the Mac has reported it.
     var usage: TurnUsage?
+    /// History is on its way. While it lands the view stays pinned to
+    /// the bottom without animating there, so the reader opens on the
+    /// newest turn and older ones fill in above, unseen.
+    var loading: Bool = false
 
     private static let indicatorID = "working"
     @ScaledMetric(relativeTo: .body) private var betweenParts: CGFloat = 12
@@ -48,6 +52,17 @@ struct Transcript: View {
                             .foregroundStyle(Color.inkMuted)
                             .padding(.top, betweenParts)
                     }
+                    if loading, rows.isEmpty {
+                        // The only blank transcript that means "wait":
+                        // small and muted, gone the moment the tail lands.
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Loading conversation")
+                                .font(.callout)
+                                .foregroundStyle(Color.inkMuted)
+                        }
+                        .padding(.top, betweenParts)
+                    }
                     if running {
                         HStack(spacing: 8) {
                             WorkingIndicator(activity: activity, since: turnStartedAt)
@@ -69,6 +84,11 @@ struct Transcript: View {
                 .padding(.vertical, betweenParts)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // Open on the newest turn, not the oldest: the anchor puts
+            // the first layout at the bottom and keeps it there while a
+            // loading transcript grows upward, and it leaves a reader who
+            // has scrolled up where they are when the tail grows.
+            .defaultScrollAnchor(.bottom)
             .background(Color.canvas)
             .onChange(of: rows.count) { scroll(proxy) }
             .onChange(of: running) { scroll(proxy) }
@@ -116,7 +136,12 @@ struct Transcript: View {
     }
 
     private func scroll(_ proxy: ScrollViewProxy) {
-        withAnimation(Motion.easeOut(0.2)) {
+        // Animating is for a turn arriving live. History landing in
+        // batches must not be seen to move: each batch pins the bottom
+        // in the same frame it lays out.
+        var transaction = Transaction(animation: loading ? nil : Motion.easeOut(0.2))
+        transaction.disablesAnimations = loading
+        withTransaction(transaction) {
             if running {
                 proxy.scrollTo(Self.indicatorID, anchor: .bottom)
             } else if !rows.isEmpty {

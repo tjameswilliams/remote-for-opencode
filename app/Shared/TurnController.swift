@@ -22,6 +22,11 @@ final class TurnController: ObservableObject {
     @Published private(set) var diffs: [FileDiff] = []
     @Published private(set) var todos: [TodoItem] = []
     @Published private(set) var running = false
+    /// A cold load is in flight: the thread was opened empty and its
+    /// history is still landing. The transcript shows a wait while the
+    /// screen is blank (the one time blank means "wait", not "new") and
+    /// pins the bottom without animating as each batch arrives.
+    @Published private(set) var loading = false
     @Published var error: String?
     @Published var permission: PermissionRequest?
     @Published var question: QuestionRequest?
@@ -322,19 +327,47 @@ final class TurnController: ObservableObject {
 
     // MARK: - Continuing an existing session
 
+    /// Loads the thread's history in batches, tail first.
+    ///
+    /// Parts are never applied one at a time: on a long thread that is
+    /// thousands of view updates, each with an animated scroll, and the
+    /// user waits a minute watching history crawl past. Instead the Mac
+    /// is asked for the parts newest first, the first screen's worth is
+    /// painted as soon as it lands, and the rest fills in above it in
+    /// doubling batches (see TranscriptLoad). An older Mac ignores the
+    /// order request and sends reading order with no header; that case
+    /// is collected whole and painted once at the end.
     func loadTranscript() async {
         guard let session else { return }
         var request = Wire.Request(kind: "transcript")
         request.session = session
         request.project = project
+        request.newestFirst = true
+        loading = rows.isEmpty
+        defer { loading = false }
+        // Parts in arrival order; `newestFirst` says which way that is.
+        var received: [TurnPart] = []
+        var newestFirst = false
+        func flush() {
+            let transcript = newestFirst ? Array(received.reversed()) : received
+            let merged = TranscriptLoad.merge(transcript, into: rows)
+            // A reload that changes nothing must not disturb the screen.
+            if merged != rows { rows = merged }
+        }
         for await event in makeLink().run(request) {
             switch event.kind {
-            case "part": if let part = event.part { upsert(part) }
+            case "transcript":
+                newestFirst = event.newestFirst == true
+            case "part":
+                guard let part = event.part else { break }
+                received.append(part)
+                if newestFirst, TranscriptLoad.shouldFlush(after: received.count) { flush() }
             case "diff": diffs = event.diffs ?? []
             case "usage": if let usage = event.usage { self.usage = usage }
             case "failed": error = event.text
             default: break
             }
         }
+        flush()
     }
 }

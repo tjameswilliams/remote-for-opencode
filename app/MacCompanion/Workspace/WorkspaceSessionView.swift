@@ -44,7 +44,8 @@ struct WorkspaceSessionView: View {
                 rows: turn.rows, diffs: turn.diffs, error: turn.error,
                 running: turn.running, activity: turn.activity,
                 turnStartedAt: turn.turnStartedAt,
-                todos: turn.todos, usage: turn.usage
+                todos: turn.todos, usage: turn.usage,
+                loading: turn.loading
             )
             .frame(maxWidth: 640)
             .frame(maxWidth: .infinity)

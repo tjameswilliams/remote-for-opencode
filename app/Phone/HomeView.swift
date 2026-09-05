@@ -1,13 +1,18 @@
 import RemoteKit
 import SwiftUI
 
-/// The launcher: recent sessions to continue, projects to start fresh in.
-/// Both lists come from the Mac in one round trip each; pull-to-refresh
-/// re-asks. Errors render inline where the list would be — on a phone,
-/// away from home, "couldn't reach your Mac" IS the content.
+/// The launcher: every project, with its conversations nested underneath.
+/// Tap a project to expand it; the freshest one arrives already open, so
+/// continuing the last conversation stays one tap. Both lists come from
+/// the Mac in one round trip each; pull-to-refresh re-asks. Errors render
+/// inline where the list would be: on a phone, away from home, "couldn't
+/// reach your Mac" IS the content.
 struct HomeView: View {
     @State private var projects: [Project] = []
     @State private var sessions: [Session] = []
+    /// Disclosure the user has set by hand, by project id. Anything absent
+    /// falls back to the default: only the freshest project open.
+    @State private var toggled: [String: Bool] = [:]
     @State private var error: String?
     @State private var loading = false
     /// Nil = unknown/checking, true = a path to the Mac exists right now.
@@ -22,10 +27,16 @@ struct HomeView: View {
     /// typed path, validated on the Mac.
     @State private var addingFolder = false
     @State private var newFolderPath = ""
+    /// The Mac's scheduled tasks; created here so the list survives
+    /// pushing in and out of the schedules screen.
+    @StateObject private var schedules = ScheduleStore()
+    /// Bound so screens without a link of their own (the schedules page
+    /// opening a run's output) can still push.
+    @State private var path = NavigationPath()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 if let error {
                     Section {
@@ -33,14 +44,19 @@ struct HomeView: View {
                             .foregroundStyle(Color.inkMuted)
                     }
                 }
-                sessionSection
-                projectSection
+                groupSection
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     // 15 rather than 13: five rows of whole-point cells.
                     BrandWordmark(height: 15, color: .ink)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink(value: Destination.schedules) {
+                        Image(systemName: "clock.badge")
+                            .accessibilityLabel("Scheduled tasks")
+                    }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     // The standing answer to "is my Mac in reach?" — probed
@@ -67,14 +83,28 @@ struct HomeView: View {
                         project: project.worktree, session: nil,
                         title: project.displayName
                     )
+                case .schedules:
+                    ScheduleListView(
+                        store: schedules, models: ModelStore.shared, projects: projects
+                    ) { session in
+                        path.append(session)
+                    }
                 }
+            }
+            // ScheduleListView pushes Session values directly; they land
+            // in the same session screen as the launcher's rows.
+            .navigationDestination(for: Session.self) { session in
+                SessionView(
+                    project: session.directory ?? "", session: session.id,
+                    title: session.title ?? "Session"
+                )
             }
             .overlay {
                 if loading, sessions.isEmpty, projects.isEmpty {
                     ProgressView("Reaching your Mac…")
                 }
             }
-            .searchable(text: $search, prompt: "Search sessions")
+            .searchable(text: $search, prompt: "Search projects and sessions")
             .onChange(of: search) {
                 searchTask?.cancel()
                 searchTask = Task {
@@ -119,6 +149,7 @@ struct HomeView: View {
     private enum Destination: Hashable {
         case session(Session)
         case project(Project)
+        case schedules
     }
 
     private func load() async {
@@ -139,81 +170,128 @@ struct HomeView: View {
         }
     }
 
+    /// The grouped list, built fresh from whatever the last round trips
+    /// returned. Session matching happened on the Mac; project names are
+    /// matched here, so a search covers both.
+    private var groups: [ProjectGroup] {
+        ProjectGrouping.groups(projects: projects, sessions: sessions, search: search)
+    }
+
+    /// The one project open by default: the freshest, so "continue where I
+    /// left off" is the state the launcher arrives in.
+    private var defaultExpandedID: String? {
+        groups.first { !$0.sessions.isEmpty }?.id
+    }
+
+    private func isExpanded(_ group: ProjectGroup) -> Bool {
+        // A search result that stayed folded would be a result withheld.
+        if !search.isEmpty { return true }
+        return toggled[group.id] ?? (group.id == defaultExpandedID)
+    }
+
     @ViewBuilder
-    private var sessionSection: some View {
-        if !sessions.isEmpty {
-            Section(search.isEmpty ? "Continue" : "Matching sessions") {
-                ForEach(sessions) { session in
-                    NavigationLink(value: Destination.session(session)) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(session.title ?? "Untitled session")
-                                .lineLimit(1)
-                            if let directory = session.directory {
-                                Text(directory.split(separator: "/").last.map(String.init) ?? directory)
-                                    .font(.caption)
-                                    .foregroundStyle(Color.inkMuted)
-                            }
+    private var groupSection: some View {
+        Section(search.isEmpty ? "Projects" : "Results") {
+            ForEach(groups) { group in
+                projectRow(group)
+                if isExpanded(group) {
+                    // Searching means looking for a conversation, not a
+                    // place to start one.
+                    if search.isEmpty, !group.project.worktree.isEmpty {
+                        NavigationLink(value: Destination.project(group.project)) {
+                            Label("New Session", systemImage: "plus")
+                                .foregroundStyle(Color.inkMuted)
+                                .padding(.leading, indent)
                         }
                     }
-                    .swipeActions(edge: .trailing) {
-                        Button(role: .destructive) { delete(session) } label: {
-                            Label("Delete", systemImage: "trash")
-                        }
-                        Button {
-                            renaming = session
-                            newTitle = session.title ?? ""
-                        } label: {
-                            Label("Rename", systemImage: "pencil")
-                        }
-                        .tint(.gray)
+                    ForEach(group.sessions) { session in
+                        sessionRow(session)
                     }
                 }
             }
-        }
-    }
-
-    /// While searching, projects are noise — the user is looking for a
-    /// conversation, not a place to start one.
-    @ViewBuilder
-    private var projectSection: some View {
-        if search.isEmpty {
-            Section("Projects") {
-                ForEach(projects) { project in
-                    NavigationLink(value: Destination.project(project)) {
-                        HStack {
-                            Text(project.displayName)
-                            if project.known == false {
-                                // Discovered on disk, never opened with
-                                // OpenCode — starting a session here is
-                                // what opens it.
-                                Spacer()
-                                Text("new")
-                                    .font(.caption2.smallCaps())
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(.quaternary, in: Capsule())
-                                    .foregroundStyle(Color.inkMuted)
-                            }
-                        }
-                    }
-                    .swipeActions(edge: .trailing) {
-                        // Only folders the user pinned by hand: known
-                        // projects are OpenCode's history, and discovered
-                        // repos would just be found again.
-                        if project.added == true {
-                            Button(role: .destructive) { removeFolder(project) } label: {
-                                Label("Remove", systemImage: "trash")
-                            }
-                        }
-                    }
-                }
+            if search.isEmpty {
                 Button {
                     addingFolder = true
                 } label: {
                     Label("Add Folder…", systemImage: "plus")
                         .foregroundStyle(Color.inkMuted)
                 }
+            } else if groups.isEmpty, !loading {
+                Text("No matching projects or sessions")
+                    .foregroundStyle(Color.inkMuted)
             }
+        }
+    }
+
+    /// Nested rows sit past the disclosure chevron's column, so a group
+    /// reads as one indented block under its project.
+    private let indent: CGFloat = 22
+
+    private func projectRow(_ group: ProjectGroup) -> some View {
+        Button {
+            withAnimation(Motion.easeOut(0.25)) {
+                toggled[group.id] = !isExpanded(group)
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.inkMuted)
+                    .rotationEffect(.degrees(isExpanded(group) ? 90 : 0))
+                Text(group.project.displayName)
+                    .foregroundStyle(Color.ink)
+                Spacer()
+                if group.project.known == false {
+                    // Discovered on disk, never opened with OpenCode;
+                    // starting a session here is what opens it.
+                    Text("new")
+                        .font(.caption2.smallCaps())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.quaternary, in: Capsule())
+                        .foregroundStyle(Color.inkMuted)
+                } else if !group.sessions.isEmpty, !isExpanded(group) {
+                    // A folded group still says how much it holds.
+                    Text("\(group.sessions.count)")
+                        .font(.caption)
+                        .foregroundStyle(Color.inkFaint)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .accessibilityLabel(
+            "\(group.project.displayName), \(isExpanded(group) ? "expanded" : "collapsed"), \(group.sessions.count) sessions"
+        )
+        .swipeActions(edge: .trailing) {
+            // Only folders the user pinned by hand: known projects are
+            // OpenCode's history, and discovered repos would just be
+            // found again.
+            if group.project.added == true {
+                Button(role: .destructive) { removeFolder(group.project) } label: {
+                    Label("Remove", systemImage: "trash")
+                }
+            }
+        }
+    }
+
+    /// No directory subtitle here: the project row above already says it.
+    private func sessionRow(_ session: Session) -> some View {
+        NavigationLink(value: Destination.session(session)) {
+            Text(session.title ?? "Untitled session")
+                .lineLimit(1)
+                .padding(.leading, indent)
+        }
+        .swipeActions(edge: .trailing) {
+            Button(role: .destructive) { delete(session) } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            Button {
+                renaming = session
+                newTitle = session.title ?? ""
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+            .tint(.gray)
         }
     }
 

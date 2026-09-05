@@ -14,15 +14,18 @@ public struct Capabilities: Codable, Equatable, Sendable {
     public var permissions: Bool?
     public var questions: Bool?
     public var diffs: Bool?
+    /// This Mac understands the schedule.* request kinds.
+    public var schedules: Bool?
 
     public init(
         opencodeVersion: String? = nil, permissions: Bool? = nil,
-        questions: Bool? = nil, diffs: Bool? = nil
+        questions: Bool? = nil, diffs: Bool? = nil, schedules: Bool? = nil
     ) {
         self.opencodeVersion = opencodeVersion
         self.permissions = permissions
         self.questions = questions
         self.diffs = diffs
+        self.schedules = schedules
     }
 }
 
@@ -378,11 +381,12 @@ public struct FileDiff: Codable, Hashable, Sendable {
     }
 }
 
-/// The session's token accounting, as OpenCode reports it. Each turn's
-/// input covers the whole conversation, so these numbers read as "how much
-/// of the model's context window this thread now occupies" — the number
-/// that says when to /summarize. Cost is the session's accumulated total.
-/// Sent as `usage` events whenever the numbers change, and once on a
+/// The latest assistant step's token accounting, as OpenCode reports it.
+/// A step's input covers the whole conversation, so these numbers read as
+/// "how much of the model's context window this thread now occupies", the
+/// number that says when to /summarize. They are one step's reading, not
+/// a sum over the session. Cost is the session's accumulated total. Sent
+/// as `usage` events whenever the numbers change, and once on a
 /// transcript load.
 public struct TurnUsage: Codable, Equatable, Sendable {
     public var input: Int?

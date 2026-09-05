@@ -110,6 +110,15 @@ final class OpenCodeProcess: ObservableObject {
         state = .stopped
     }
 
+    /// A deliberate stop and fresh launch: how a config change reaches
+    /// OpenCode, which reads its global config only at startup. The
+    /// restart counter resets so this never reads as a crash.
+    func restart() {
+        stop()
+        restartAttempts = 0
+        launch()
+    }
+
     private func launch() {
         guard let binary = Self.findBinary() else {
             state = .failed("OpenCode isn't installed. Install it with: brew install opencode")

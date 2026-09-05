@@ -62,12 +62,8 @@ struct ApprovalsView: View {
                 if !loading, pending.isEmpty, questions.isEmpty, error == nil {
                     // The honest empty state: someone (or a timeout) already
                     // answered, or the turn finished — nothing is stuck.
-                    Label(
-                        attention.kind == "done"
-                            ? "The agent finished." : "Nothing is waiting on you.",
-                        systemImage: attention.kind == "done" ? "checkmark.circle" : "checkmark.seal"
-                    )
-                    .foregroundStyle(.secondary)
+                    Label(emptyText, systemImage: emptySymbol)
+                        .foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("Needs You")
@@ -94,6 +90,23 @@ struct ApprovalsView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var emptyText: String {
+        switch attention.kind {
+        case "done": return "The agent finished."
+        case "missed":
+            return "A scheduled task missed its time while your Mac was unavailable. Open Scheduled Tasks from the home screen to run it now."
+        default: return "Nothing is waiting on you."
+        }
+    }
+
+    private var emptySymbol: String {
+        switch attention.kind {
+        case "done": return "checkmark.circle"
+        case "missed": return "clock.badge.exclamationmark"
+        default: return "checkmark.seal"
         }
     }
 

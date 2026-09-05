@@ -25,9 +25,12 @@ final class RemoteServer: ObservableObject {
     /// Where the running OpenCode instance is, or nil while it's down —
     /// requests during a restart get an honest transient failure.
     private let adapter: () -> OpenCodeAdapter?
+    /// The scheduled task engine; schedule.* requests are its remote face.
+    private let scheduler: Scheduler
 
-    init(adapter: @escaping () -> OpenCodeAdapter?) {
+    init(adapter: @escaping () -> OpenCodeAdapter?, scheduler: Scheduler) {
         self.adapter = adapter
+        self.scheduler = scheduler
     }
 
     /// The user's kill switch: while paused, the Mac neither advertises nor
@@ -56,7 +59,7 @@ final class RemoteServer: ObservableObject {
         guard !paused else { return }
         punch.onStream = { [weak self] stream in
             guard let self else { return }
-            Connection(stream, adapter: adapter, logger: logger).start()
+            Connection(stream, adapter: adapter, scheduler: scheduler, logger: logger).start()
         }
         // The punched path needs a pairing to derive its keys from, and
         // PunchListener.start() bails quietly without one — so re-kick it
@@ -86,7 +89,8 @@ final class RemoteServer: ObservableObject {
                 guard let self else { return }
                 Task { @MainActor in
                     Connection(
-                        TCPTransport(conn), adapter: self.adapter, logger: self.logger
+                        TCPTransport(conn), adapter: self.adapter,
+                        scheduler: self.scheduler, logger: self.logger
                     ).start()
                 }
             }
@@ -130,6 +134,7 @@ extension Bundle {
 private final class Connection {
     private let transport: WireTransport
     private let adapter: () -> OpenCodeAdapter?
+    private let scheduler: Scheduler
     private let logger: Logger
     private var framer = LineFramer()
     private let serverNonce = Wire.Security.nonce()
@@ -145,10 +150,12 @@ private final class Connection {
     init(
         _ transport: WireTransport,
         adapter: @escaping () -> OpenCodeAdapter?,
+        scheduler: Scheduler,
         logger: Logger
     ) {
         self.transport = transport
         self.adapter = adapter
+        self.scheduler = scheduler
         self.logger = logger
     }
 
@@ -251,6 +258,12 @@ private final class Connection {
     // MARK: - Requests
 
     private func serve(_ request: Wire.Request) {
+        // Schedules live in the companion, not in OpenCode, so editing them
+        // must work even while OpenCode is down or restarting.
+        if request.kind.hasPrefix("schedule.") {
+            serveSchedule(request)
+            return
+        }
         guard let adapter = adapter() else {
             var e = Wire.Event(kind: "failed")
             e.text = "OpenCode is starting on your Mac — try again in a moment."
@@ -280,7 +293,10 @@ private final class Connection {
             }
         case "sessions":
             answer { var e = Wire.Event(kind: "sessions")
-                     e.sessions = try await adapter.sessions(search: request.search)
+                     // 100, not the adapter's default 20: clients group
+                     // sessions under projects now, and 20 recents would
+                     // starve every project but the busiest one.
+                     e.sessions = try await adapter.sessions(limit: 100, search: request.search)
                      return [e] }
         case "agents":
             answer {
@@ -383,22 +399,38 @@ private final class Connection {
         case "transcript":
             answer {
                 guard let session = request.session, let directory = request.project else { return [] }
+                // One fetch for everything below: the message list is the
+                // whole thread, and a long one is megabytes.
+                let messages = try await adapter.messages(sessionID: session, directory: directory)
+                var parts = adapter.transcript(in: messages)
                 var events: [Wire.Event] = []
-                for part in try await adapter.transcript(sessionID: session, directory: directory) {
+                if request.newestFirst == true {
+                    // Tail first, so the client can paint the screen the
+                    // user actually lands on while the rest is still in
+                    // flight. The header is what tells it the order; an
+                    // older client never asks and never sees one.
+                    var header = Wire.Event(kind: "transcript")
+                    header.newestFirst = true
+                    header.count = parts.count
+                    header.session = session
+                    events.append(header)
+                    parts.reverse()
+                }
+                for part in parts {
                     var e = Wire.Event(kind: "part")
                     e.part = part
                     e.session = session
                     events.append(e)
                 }
                 var diff = Wire.Event(kind: "diff")
-                diff.diffs = try await adapter.turnDiffs(sessionID: session, directory: directory)
+                diff.diffs = adapter.turnDiffs(in: messages)
                 diff.session = session
                 events.append(diff)
                 // The context meter's starting point: without this, an
                 // opened session shows nothing until the next turn moves
                 // the numbers.
                 if let usage = try? await adapter.sessionUsage(
-                    sessionID: session, directory: directory
+                    in: messages, sessionID: session, directory: directory
                 ) {
                     var e = Wire.Event(kind: "usage")
                     e.usage = usage
@@ -408,19 +440,63 @@ private final class Connection {
                 return events
             }
         default:
-            // Almost always a phone newer than the Mac app it's talking to
-            // — the companion is a menu bar app people leave running for
-            // weeks, so "rebuilt but not relaunched" is the normal way to
-            // arrive here. Say that, rather than a bare protocol error.
-            var e = Wire.Event(kind: "failed")
-            e.text = """
-            The Remote for OpenCode app on this Mac doesn't understand "\(request.kind)" \
-            — it's an older version (\(Bundle.companionVersion)). Quit and \
-            reopen Remote for OpenCode on your Mac.
-            """
-            write(e)
-            write(Wire.Event(kind: "done"))
+            answerUnknown(request.kind)
         }
+    }
+
+    /// Almost always a phone newer than the Mac app it's talking to: the
+    /// companion is a menu bar app people leave running for weeks, so
+    /// "rebuilt but not relaunched" is the normal way to arrive here. Say
+    /// that, rather than a bare protocol error.
+    private func answerUnknown(_ kind: String) {
+        var e = Wire.Event(kind: "failed")
+        e.text = """
+        The Remote for OpenCode app on this Mac doesn't understand "\(kind)"; \
+        it's an older version (\(Bundle.companionVersion)). Quit and \
+        reopen Remote for OpenCode on your Mac.
+        """
+        write(e)
+        write(Wire.Event(kind: "done"))
+    }
+
+    /// The scheduled task requests. Same server-authoritative shape as the
+    /// project list: every operation answers with the complete regenerated
+    /// list, so a client's copy is always the Mac's truth, never its own
+    /// guess.
+    private func serveSchedule(_ request: Wire.Request) {
+        let scheduler = scheduler
+        switch request.kind {
+        case "schedule.list":
+            answer { [await Self.schedulesEvent(scheduler)] }
+        case "schedule.save":
+            answer {
+                guard let task = request.task else { return [] }
+                _ = try await scheduler.save(task)
+                return [await Self.schedulesEvent(scheduler)]
+            }
+        case "schedule.delete":
+            answer {
+                guard let id = request.taskID else { return [] }
+                _ = await scheduler.delete(id: id)
+                return [await Self.schedulesEvent(scheduler)]
+            }
+        case "schedule.run":
+            answer {
+                guard let id = request.taskID else { return [] }
+                _ = await scheduler.runNow(id: id)
+                return [await Self.schedulesEvent(scheduler)]
+            }
+        default:
+            answerUnknown(request.kind)
+        }
+    }
+
+    @MainActor
+    private static func schedulesEvent(_ scheduler: Scheduler) -> Wire.Event {
+        var e = Wire.Event(kind: "schedules")
+        e.tasks = scheduler.list()
+        e.timeZone = scheduler.timeZoneIdentifier
+        return e
     }
 
     /// The whole project launcher in one event: known projects (OpenCode's
@@ -535,18 +611,70 @@ actor InvocationFailure {
     func record(_ error: Error) { self.error = error }
 }
 
+/// Records when a turn last made progress, so a watchdog can tell a slow
+/// model from a dead one. Reset on every event for the turn's own session.
+actor ActivityClock {
+    private var last = Date()
+    func touch() { last = Date() }
+    func idleSeconds() -> TimeInterval { Date().timeIntervalSince(last) }
+}
+
+/// A one-shot gate: `wait` returns the moment `open` is called, or when the
+/// timeout elapses, whichever comes first, and never blocks again after.
+/// Used to hold a prompt until its event subscription has connected, with
+/// a ceiling so a stream that never connects can't wedge the turn.
+actor AsyncStreamGate {
+    private var opened = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func open() {
+        guard !opened else { return }
+        opened = true
+        let pending = waiters
+        waiters = []
+        for waiter in pending { waiter.resume() }
+    }
+
+    func wait(timeout: Duration) async {
+        if opened { return }
+        let timer = Task {
+            try? await Task.sleep(for: timeout)
+            await self.open()
+        }
+        await withCheckedContinuation { continuation in
+            if opened {
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+            }
+        }
+        timer.cancel()
+    }
+}
+
 /// Runs one prompt turn against OpenCode: ensure a session, subscribe to its
 /// event stream, fire the prompt, and translate what happens into protocol
 /// v1 events until the session goes idle.
+/// Thrown by the stall watchdog when a turn makes no progress for the
+/// whole window while the event stream is still alive.
+struct StallTimeout: Error {}
+
 enum TurnRunner {
+    /// How long a turn may make no progress before the watchdog gives up.
+    /// Well past a slow first token or a large image's prefill; short
+    /// enough that a hung local model surfaces as an error, not a phantom
+    /// disconnect.
+    static let stallTimeout: TimeInterval = 120
+
     @MainActor
     static func run(
         _ request: Wire.Request, adapter: OpenCodeAdapter,
         emit: @escaping (Wire.Event) -> Void
     ) async {
-        func fail(_ message: String) {
+        func fail(_ message: String, transient: Bool = false) {
             var e = Wire.Event(kind: "failed")
             e.text = message
+            e.transient = transient ? true : nil
             emit(e)
             emit(Wire.Event(kind: "done"))
         }
@@ -626,8 +754,20 @@ enum TurnRunner {
                 return
             }
 
-            // Subscribe before invoking so nothing falls between.
-            let events = adapter.events(directory: directory)
+            // Subscribe before invoking, and wait for the subscription to
+            // actually connect. `events()` opens the SSE stream on its own
+            // task, so "call it first" is not enough: a prompt whose error
+            // is near-instant (an image that won't decode emits
+            // `session.error` within a second) can beat the connection and
+            // be lost, hanging the turn on an idle that never arrives. The
+            // gate has a ceiling so a stream that never connects falls
+            // through to the pump's own stream-ended handling rather than
+            // blocking here.
+            let connected = AsyncStreamGate()
+            let events = adapter.events(directory: directory) {
+                Task { await connected.open() }
+            }
+            await connected.wait(timeout: .seconds(5))
 
             // The two invocations have opposite timing: prompt_async
             // returns at once, while POST /command blocks for the whole
@@ -668,19 +808,52 @@ enum TurnRunner {
             }
             defer { invocation.cancel() }
 
-            switch try await pump(
-                events, sessionID: sessionID, directory: directory, adapter: adapter,
-                failure: failure, stopAtIdle: true, emit: emit
-            ) {
+            // A stall watchdog runs alongside the pump. If our session
+            // makes no progress for the whole window (no token, no status,
+            // nothing) while the stream itself stays up on its heartbeat,
+            // the model has stopped answering (a local backend that hangs on
+            // an image request is the case that prompted this). Left alone
+            // the turn would wait forever and read as a dead connection, so
+            // it is ended as a retryable failure instead. The window is
+            // generous: a slow first token or a long image prefill is not a
+            // stall.
+            let clock = ActivityClock()
+            let end = try await withThrowingTaskGroup(of: PumpEnd.self) { group in
+                group.addTask {
+                    try await pump(
+                        events, sessionID: sessionID, directory: directory, adapter: adapter,
+                        failure: failure, stopAtIdle: true,
+                        onActivity: { Task { await clock.touch() } }, emit: emit
+                    )
+                }
+                group.addTask {
+                    while true {
+                        try await Task.sleep(for: .seconds(15))
+                        if await clock.idleSeconds() >= Self.stallTimeout {
+                            throw StallTimeout()
+                        }
+                    }
+                }
+                let first = try await group.next()!
+                group.cancelAll()
+                return first
+            }
+            switch end {
             case .idle, .failed:
                 // Terminal events already emitted inside the pump.
                 return
             case .streamEnded:
                 // The SSE stream ended without an idle — OpenCode went away.
-                fail("Lost OpenCode's event stream on your Mac.")
+                // That is a restart, not a verdict; worth retrying.
+                fail("Lost OpenCode's event stream on your Mac.", transient: true)
             }
+        } catch is StallTimeout {
+            fail(
+                "The model stopped responding on your Mac. It may not support this input, or the local server is stuck.",
+                transient: true
+            )
         } catch {
-            fail(error.localizedDescription)
+            fail(error.localizedDescription, transient: OpenCodeAdapter.isTransient(error))
         }
     }
 
@@ -732,11 +905,13 @@ enum TurnRunner {
         _ events: AsyncThrowingStream<[String: Any], Error>,
         sessionID: String, directory: String, adapter: OpenCodeAdapter,
         failure: InvocationFailure?, stopAtIdle: Bool,
+        onActivity: (@Sendable () -> Void)? = nil,
         emit: @escaping (Wire.Event) -> Void
     ) async throws -> PumpEnd {
-        func fail(_ message: String) {
+        func fail(_ message: String, transient: Bool = false) {
             var e = Wire.Event(kind: "failed")
             e.text = message
+            e.transient = transient ? true : nil
             emit(e)
             emit(Wire.Event(kind: "done"))
         }
@@ -763,11 +938,15 @@ enum TurnRunner {
         // live typing; the flush at idle guarantees nothing is lost.
         var lastEmit: [String: Date] = [:]
         let minimumInterval: TimeInterval = 0.1
-        // The session's token totals as last sent. `session.updated` also
-        // fires for titles and timestamps, and LiveTurns buffers every
-        // event for replay — so usage goes out only when the numbers
-        // actually moved, which is roughly once per model step.
+        // The context meter as last sent. `message.updated` fires several
+        // times per step (creation, each timestamp, the finish), and
+        // LiveTurns buffers every event for replay, so usage goes out
+        // only when the numbers actually moved, which is once per step:
+        // the tokens land with the finish.
         var lastUsage: TurnUsage?
+        // The session's accumulated cost, from the session record; the
+        // one figure that is meant to grow across steps.
+        var sessionCost: Double?
         // Context windows per "provider/model", fetched once per pump on
         // the first usage and cached: the catalog doesn't change under a
         // running turn.
@@ -792,39 +971,53 @@ enum TurnRunner {
             // model that doesn't exist. No session event will ever say
             // so, because the turn never started.
             if let failure, let error = await failure.error {
-                fail(error.localizedDescription)
+                fail(error.localizedDescription, transient: OpenCodeAdapter.isTransient(error))
                 return .failed
             }
             let type = event["type"] as? String ?? ""
             let properties = event["properties"] as? [String: Any] ?? [:]
+            // Progress on our own session resets the stall watchdog. The
+            // instance-wide heartbeat carries no sessionID, so a turn whose
+            // model has stopped answering goes quiet here even while the
+            // stream stays alive, which is exactly the case to catch.
+            if properties["sessionID"] as? String == sessionID { onActivity?() }
             switch type {
             case "message.updated":
-                if let info = properties["info"] as? [String: Any],
-                   let id = info["id"] as? String, let role = info["role"] as? String {
-                    roles[id] = role
-                }
-            case "session.created", "session.updated":
-                // The session record carries the running token totals and
-                // accumulated cost — how full the model's context is, the
-                // number that tells a user when to /summarize.
                 guard let info = properties["info"] as? [String: Any],
-                      info["id"] as? String == sessionID,
+                      let id = info["id"] as? String, let role = info["role"] as? String
+                else { continue }
+                roles[id] = role
+                // An assistant step's own token accounting is the context
+                // meter: its input covers the whole conversation, so it
+                // says how full the model's window is right now, the
+                // number that tells a user when to /summarize. (The
+                // session record's totals are summed over every step ever
+                // run, and would read as millions on a long thread.)
+                guard info["sessionID"] as? String == sessionID,
                       var usage = OpenCodeAdapter.usage(from: info)
                 else { continue }
-                if let model = info["model"] as? [String: Any],
-                   let providerID = model["providerID"] as? String,
-                   let modelID = model["id"] as? String {
+                if let providerID = info["providerID"] as? String,
+                   let modelID = info["modelID"] as? String {
                     if contextLimits == nil {
                         contextLimits = (try? await adapter.contextLimits()) ?? [:]
                     }
                     usage.contextLimit = contextLimits?["\(providerID)/\(modelID)"]
                 }
+                usage.cost = sessionCost
                 guard usage != lastUsage else { continue }
                 lastUsage = usage
                 var e = Wire.Event(kind: "usage")
                 e.usage = usage
                 e.session = sessionID
                 emit(e)
+            case "session.created", "session.updated":
+                // Only the accumulated cost is read off the session record;
+                // it rides along on the next usage event.
+                if let info = properties["info"] as? [String: Any],
+                   info["id"] as? String == sessionID,
+                   let cost = info["cost"] as? Double {
+                    sessionCost = cost
+                }
             case "message.part.updated":
                 guard let part = properties["part"] as? [String: Any],
                       part["sessionID"] as? String == sessionID
@@ -918,14 +1111,19 @@ enum TurnRunner {
                 emit(e)
             case "session.error":
                 guard properties["sessionID"] as? String == sessionID else { continue }
+                // The event's payload is the only place the real reason
+                // lives (prompt_async already answered 204); surface it,
+                // and classify it so a retry loop can tell a rate limit
+                // from a bad model id.
+                let (message, transient) = OpenCodeAdapter.sessionError(from: properties)
                 if stopAtIdle {
-                    fail("The agent hit an error on your Mac.")
+                    fail(message, transient: transient)
                     return .failed
                 }
                 // A watched turn erred; the thread is still alive, so
                 // say so without done and keep watching.
                 var e = Wire.Event(kind: "failed")
-                e.text = "The agent hit an error on your Mac."
+                e.text = message
                 emit(e)
             case "session.idle":
                 guard properties["sessionID"] as? String == sessionID else { continue }

@@ -24,6 +24,8 @@ looking at the repo itself.
 | Approvals | `/permission`, `/permission/{id}/reply` |
 | Questions | `/question`, `/question/{id}/reply` |
 | MCP toggles | `GET /mcp`, `GET /session/{id}` (permission ruleset), `PATCH /session/{id} {permission}` |
+| Scheduled tasks | No new endpoints: companion-owned (`schedule.*` wire kinds, 2026-09-01); fires ride the existing prompt path headlessly. OpenCode itself has no scheduler, so this is companion-side value on top of the same surface. |
+| Model sources | No new endpoints: companion-owned (2026-09-04). The Mac reads each configured OpenAI-style endpoint's `/models` listing and rewrites that provider's block in the global `opencode.json` after the user reviews the change, then restarts `opencode serve`. OpenCode has no discovery for custom providers and reads the global config only at startup (verified on 1.18.15: no watcher, and `/global/dispose` does not reload it). See docs/model-sources.md. |
 
 ## Closed since this audit (2026-08-03)
 

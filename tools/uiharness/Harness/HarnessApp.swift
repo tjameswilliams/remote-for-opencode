@@ -20,6 +20,7 @@ struct HarnessView: View {
     @StateObject private var models = ModelStore.shared
     @StateObject private var agents = AgentStore.shared
     @StateObject private var mcp = McpStore(project: "/tmp/harness", session: nil)
+    @StateObject private var schedules = ScheduleStore()
     @StateObject private var attachments = PromptAttachments()
     @StateObject private var dictation = Dictation()
     @State private var input = ""
@@ -44,6 +45,7 @@ struct HarnessView: View {
             models.mockForHarness()
             agents.mockForHarness(plan: scene == 4)
             mcp.mockForHarness()
+            schedules.mockForHarness()
         }
     }
 
@@ -53,6 +55,7 @@ struct HarnessView: View {
         case 2: permission
         case 3: patch
         case 4: planning
+        case 5: scheduled
         default: working
         }
     }
@@ -78,6 +81,16 @@ struct HarnessView: View {
             )
             composer
         }
+    }
+
+    private var scheduled: some View {
+        ScheduleListView(
+            store: schedules, models: models,
+            projects: [
+                Project(id: "p1", worktree: "/Users/t/app", name: "app"),
+                Project(id: "p2", worktree: "/Users/t/site", name: "site"),
+            ]
+        ) { _ in }
     }
 
     private var permission: some View {

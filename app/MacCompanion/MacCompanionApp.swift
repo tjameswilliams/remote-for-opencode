@@ -10,6 +10,8 @@ struct MacCompanionApp: App {
     @StateObject private var opencode: OpenCodeProcess
     @StateObject private var phone = ConnectedClients.shared
     @StateObject private var server: RemoteServer
+    @StateObject private var scheduler: Scheduler
+    @StateObject private var modelSources = ModelSourceStore.shared
     @State private var started = false
     /// Sparkle drives its own update checks against the appcast; this also
     /// backs the menu's manual "Check for Updates…". The app is distributed
@@ -47,19 +49,26 @@ struct MacCompanionApp: App {
     init() {
         let opencode = OpenCodeProcess()
         _opencode = StateObject(wrappedValue: opencode)
+        let adapter: () -> OpenCodeAdapter? = { [weak opencode] in
+            guard case let .running(port, _) = opencode?.state else { return nil }
+            return OpenCodeAdapter(port: port)
+        }
+        let scheduler = Scheduler(adapter: adapter)
+        _scheduler = StateObject(wrappedValue: scheduler)
         // Built eagerly rather than in onAppear so the menu can observe its
         // conflict state from the first frame — a second instance must be
         // able to say so before the user opens anything.
-        _server = StateObject(wrappedValue: RemoteServer(adapter: { [weak opencode] in
-            guard case let .running(port, _) = opencode?.state else { return nil }
-            return OpenCodeAdapter(port: port)
-        }))
+        _server = StateObject(wrappedValue: RemoteServer(adapter: adapter, scheduler: scheduler))
+        // Applying a model change ends in a restart of our own `opencode
+        // serve`, held back while a turn is mid-flight.
+        ModelSourceStore.shared.restartOpenCode = { [weak opencode] in opencode?.restart() }
+        ModelSourceStore.shared.activeTurns = { LiveTurns.shared.activeCount }
     }
 
     var body: some Scene {
         MenuBarExtra("Remote for OpenCode", systemImage: menuSymbol) {
             StatusMenu(
-                opencode: opencode, phone: phone, server: server,
+                opencode: opencode, phone: phone, server: server, modelSources: modelSources,
                 updater: Self.updatesConfigured ? updater : nil
             )
             .onAppear(perform: bootstrap)
@@ -91,6 +100,8 @@ struct MacCompanionApp: App {
         if Self.updatesConfigured { updater.startUpdater() }
         opencode.start()
         server.start()
+        scheduler.start()
+        modelSources.start()
     }
 }
 
@@ -98,6 +109,7 @@ struct StatusMenu: View {
     @ObservedObject var opencode: OpenCodeProcess
     @ObservedObject var phone: ConnectedClients
     @ObservedObject var server: RemoteServer
+    @ObservedObject var modelSources: ModelSourceStore
     var updater: SPUStandardUpdaterController?
     @Environment(\.openWindow) private var openWindow
 
@@ -122,6 +134,17 @@ struct StatusMenu: View {
                 Text("\(name) connected")
             } else if !PairingStore.peers().isEmpty {
                 Text("No device connected")
+            }
+            if !modelSources.pending.isEmpty {
+                // A check found something; nothing is written until the
+                // user has seen it, so the menu is where it waits.
+                Button("Review Model Changes…") {
+                    openWindow(id: "workspace")
+                    NSApp.activate(ignoringOtherApps: true)
+                    modelSources.reviewRequested = true
+                }
+            } else if modelSources.restartNeeded {
+                Button("Restart OpenCode for New Models") { modelSources.restartNow() }
             }
             Divider()
             Button("Open Workspace") {

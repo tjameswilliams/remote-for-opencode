@@ -44,7 +44,8 @@ struct SessionView: View {
                 rows: turn.rows, diffs: turn.diffs, error: turn.error,
                 running: turn.running, activity: turn.activity,
                 turnStartedAt: turn.turnStartedAt,
-                todos: turn.todos, usage: turn.usage
+                todos: turn.todos, usage: turn.usage,
+                loading: turn.loading
             )
             if let matches = paletteMatches {
                 CommandPalette(commands: matches) { command in

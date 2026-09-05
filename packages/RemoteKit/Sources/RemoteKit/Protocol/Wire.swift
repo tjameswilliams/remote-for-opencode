@@ -97,6 +97,18 @@ public enum Wire {
         /// which is what keeps an oblivious client from erasing rules
         /// another one set. "mcp" (list) answers with the same names.
         public var mcp: [String: Bool]?
+        /// schedule.save: the task to create or replace (matched by id).
+        /// Every schedule.* request answers with a fresh `schedules` event,
+        /// so a client's list is always the Mac's truth.
+        public var task: ScheduledTask?
+        /// schedule.delete/schedule.run: which task.
+        public var taskID: String?
+        /// transcript: send the parts newest first, behind a leading
+        /// `transcript` event that says so, so a long thread paints its
+        /// tail before the rest lands. An older Mac ignores this and
+        /// answers oldest first with no marker; a client that asks must
+        /// cope with either order.
+        public var newestFirst: Bool?
 
         public init(kind: String) { self.kind = kind }
     }
@@ -126,7 +138,8 @@ public enum Wire {
     /// Kinds:
     /// - handshake: `challenge`, `ready`, `failed`, `done`
     /// - answers:   `status`, `projects`, `sessions`, `part`, `permission`,
-    ///              `diff`, `idle`
+    ///              `diff`, `idle`, `transcript` (the header of a
+    ///              newest-first transcript answer)
     /// - reconnection: `unknown` (resume for a turn the Mac never heard of —
     ///   ask again, nothing is wrong), `interrupted` (synthesised locally by
     ///   MacLink when a transport dies mid-answer; never on the wire)
@@ -175,6 +188,17 @@ public enum Wire {
         public var session: String?
         /// On `failed`: transient, worth retrying without asking the user.
         public var transient: Bool?
+        /// On `schedules`: the Mac's complete scheduled task list.
+        public var tasks: [ScheduledTask]?
+        /// On `schedules`: the Mac's timezone identifier, so a client can
+        /// render fire times as the wall-clock times they actually are.
+        public var timeZone: String?
+        /// On `transcript`: the parts that follow arrive newest first.
+        /// Only ever sent when the request asked for that order, so its
+        /// absence means the parts are in reading order.
+        public var newestFirst: Bool?
+        /// On `transcript`: how many parts follow.
+        public var count: Int?
         /// Never on the wire. Set by MacLink on failures it synthesises
         /// itself, so callers can tell "couldn't reach the Mac" from "the
         /// Mac said no".

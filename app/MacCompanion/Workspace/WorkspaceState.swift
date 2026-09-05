@@ -7,6 +7,11 @@ enum WorkspaceSelection: Hashable {
     case session(Session)
     /// Start fresh in a project.
     case project(Project)
+    /// The scheduled tasks screen: what this Mac runs on its own.
+    case schedules
+    /// The model sources screen: the endpoints this Mac keeps OpenCode's
+    /// model list in step with. This Mac only; it edits a local file.
+    case modelSources
 }
 
 /// One workspace window's world: the peer it is talking to (v1: always
@@ -47,6 +52,7 @@ final class WorkspaceState: ObservableObject {
         models = ModelStore(makeLink: makeLink)
         agents = AgentStore(makeLink: makeLink)
         commands = CommandStore(makeLink: makeLink)
+        schedules = ScheduleStore(makeLink: makeLink)
         selection = nil
         sessions = []
         projects = []
@@ -81,6 +87,7 @@ final class WorkspaceState: ObservableObject {
     private(set) var models: ModelStore
     private(set) var agents: AgentStore
     private(set) var commands: CommandStore
+    private(set) var schedules: ScheduleStore
 
     private var searchTask: Task<Void, Never>?
 
@@ -90,6 +97,7 @@ final class WorkspaceState: ObservableObject {
         models = ModelStore(makeLink: link)
         agents = AgentStore(makeLink: link)
         commands = CommandStore(makeLink: link)
+        schedules = ScheduleStore(makeLink: link)
     }
 
     func load() async {

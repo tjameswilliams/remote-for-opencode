@@ -153,6 +153,35 @@ struct WireTests {
         #expect(decodedUsage.usage?.total == 40000)
         #expect(decodedUsage.usage?.fraction == 0.2)
         #expect(decodedUsage.usage?.cost == 0.42)
+
+        var save = Wire.Request(kind: "schedule.save")
+        var task = ScheduledTask(id: "t1", name: "Nightly triage", project: "/Users/x/repo")
+        task.prompt = "Review open issues"
+        task.providerID = "anthropic"
+        task.modelID = "claude-sonnet-5"
+        task.cron = "0 9 * * 1-5"
+        save.task = task
+        let decodedSave = try JSONDecoder().decode(
+            Wire.Request.self, from: JSONEncoder().encode(save)
+        )
+        #expect(decodedSave.task == task)
+        #expect(decodedSave.task?.isEnabled == true, "absent enabled reads as on")
+
+        var schedules = Wire.Event(kind: "schedules")
+        schedules.tasks = [task]
+        schedules.timeZone = "America/Los_Angeles"
+        let decodedSchedules = try JSONDecoder().decode(
+            Wire.Event.self, from: JSONEncoder().encode(schedules)
+        )
+        #expect(decodedSchedules.tasks == [task])
+        #expect(decodedSchedules.timeZone == "America/Los_Angeles")
+
+        var ready = Wire.Event(kind: "ready")
+        ready.capabilities = Capabilities(schedules: true)
+        let decodedReady = try JSONDecoder().decode(
+            Wire.Event.self, from: JSONEncoder().encode(ready)
+        )
+        #expect(decodedReady.capabilities?.schedules == true)
     }
 
     @Test("Unknown fields from a newer peer decode cleanly")

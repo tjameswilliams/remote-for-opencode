@@ -63,6 +63,12 @@ targets:
           Remote for OpenCode serves your coding agent to your paired iPhone on your
           local network.
         NSBonjourServices: ["_opencodego._tcp"]
+        # Model sources are the user's own endpoints, and a home vLLM or a
+        # proxy over Tailscale speaks plain HTTP. Loopback is exempt from
+        # App Transport Security already; this covers everything else the
+        # user points the companion at. The phone's plist is untouched.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.timwilliams.opencodego.mac

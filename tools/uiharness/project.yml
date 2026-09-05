@@ -41,6 +41,8 @@ targets:
       - path: ../../app/Shared/PromptAttachments.swift
       - path: ../../app/Shared/ModelStore.swift
       - path: ../../app/Shared/McpStore.swift
+      - path: ../../app/Shared/ScheduleStore.swift
+      - path: ../../app/Shared/ScheduleViews.swift
     info:
       path: Harness/Info.plist
       properties:

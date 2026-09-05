@@ -193,6 +193,55 @@ request. Its rows are already `FileDiff`-shaped
   `{kind: "pending", permissions: [PermissionRequest]}` from
   `GET /permission?directory=…`. What a push-woken phone asks first.
 
+### `schedule.*`: tasks the Mac runs later
+- Four kinds, every one answering with the complete regenerated list
+  `{kind: "schedules", tasks: [ScheduledTask], timeZone}` plus `done`:
+  - `{kind: "schedule.list"}`
+  - `{kind: "schedule.save", task}`: create or replace, matched by
+    `task.id` (client-minted UUID). Validation happens on the Mac (cron
+    parses, exactly one of `cron`/`runAt`, non-empty prompt); a rejected
+    save is a readable `failed`.
+  - `{kind: "schedule.delete", taskID}`
+  - `{kind: "schedule.run", taskID}`: fire now, outside the schedule; the
+    next cron beat is untouched.
+- Nothing here touches OpenCode: the list lives in the companion
+  (UserDefaults), and these kinds are served even while OpenCode is down
+  or restarting, before the adapter guard. `capabilities.schedules` on
+  `ready`/`status` is the feature gate; an older Mac answers with its
+  usual "older version" failure and clients surface that as the error.
+- `ScheduledTask` carries the definition (name, project worktree, prompt,
+  `providerID`/`modelID` with absent meaning the Mac's default exactly
+  like a prompt, optional `agent`, `cron` XOR `runAt`, `enabled`) and
+  Mac-written history (`lastRun`, `lastOutcome`
+  running/succeeded/failed/missed, `lastError`, `lastSessionID`,
+  `lastTurnID`, `nextFire`). Clients read history and never write it; an
+  edit preserves it on the Mac. A fired one-shot is disabled, not
+  deleted.
+- Cron is 5 fields in the Mac's local time (`timeZone` on the event is
+  how clients render fire times honestly), vixie day-OR rule, no name
+  tokens or macros. Parsing and next-fire math live in RemoteKit
+  (`Scheduling/CronSchedule.swift`), unit-tested including the DST
+  edges: a spring-forward gap skips, a fall-back repeat fires once.
+- A fire is an ordinary headless prompt turn: the scheduler mints a turn
+  id and runs TurnRunner through LiveTurns with **no sink**, so
+  permissions, questions, failures, and completion escalate to the
+  CloudKit push exactly as they do for a backgrounded phone, and a
+  client can `resume` the turn by id while it lingers. Each fire starts
+  a fresh session; `lastSessionID` is how the transcript is read later.
+- Retry: transient failures (`transient: true` on the `failed` event:
+  OpenCode restarting or absent, a lost SSE stream, provider
+  rate-limit/overload wording in `session.error`) retry up to 3 times on
+  a 30s/2m/8m backoff (`Scheduling/RetryPolicy.swift`), reusing the
+  session the first attempt created. A swallowed transient failure never
+  reaches the turn's event buffer, so no premature push goes out and a
+  resuming client never sees a failure that was about to be retracted.
+  Anything unrecognized classifies as NOT transient on purpose.
+- Missed fires: on launch and on wake the Mac resolves anything that
+  came due while it was off; less than an hour late runs anyway, later
+  is recorded `missed` and published as a `missed` Attention kind (the
+  shipped phone's `kind != "permission"` subscription already delivers
+  it with the generic alert).
+
 ## Push (M3, no relay)
 
 Mac writes an `Attention` record (kind, sessionID, directory) to the user's
@@ -216,26 +265,44 @@ Two sources with different lifetimes:
 - `GET /vcs/diff` requires a `mode` query param (working-tree level; not
   needed for v1).
 
-### `usage` — context occupancy and cost
-- `session.created` / `session.updated` events carry the session record,
-  whose `info.tokens` ({input, output, reasoning, cache{read, write}})
-  and accumulated `info.cost` are the running totals. Each turn's input
-  covers the whole conversation, so the totals read as "how full is the
-  model's context window" — the number that says when to `/summarize`.
-- The pump maps them to `{kind: "usage", usage: TurnUsage}` events on
-  both prompt turns and watches, emitted only when the numbers change
-  (the same events also fire for titles and timestamps, and LiveTurns
-  buffers everything for replay). The all-zero record a fresh session
-  carries is dropped, not sent as an empty meter.
+### `usage`: context occupancy and cost
+- `message.updated` events for assistant messages carry `info.tokens`
+  ({total, input, output, reasoning, cache{read, write}}) for that one
+  step. A step's input covers the whole conversation, so its tokens read
+  as "how full is the model's context window", the number that says when
+  to `/summarize`. The session record's `info.tokens` is *not* that: it
+  is summed over every step the session has ever run (1.2M on a 30-step
+  thread whose last step was 64k), so only `info.cost` is read from it.
+- The pump maps assistant `message.updated` events to
+  `{kind: "usage", usage: TurnUsage}` on both prompt turns and watches,
+  emitted only when the numbers change (the same event fires several
+  times per step, and LiveTurns buffers everything for replay). An
+  all-zero record, which is what an aborted step leaves behind, is
+  dropped, not sent as an empty meter.
 - `usage.contextLimit` is resolved on the Mac from `GET /config/providers`
   (`limit.context` per model, fetched once per pump), because a
   default-model prompt means the client can't name the model it would be
   dividing by. Clients render a raw token count when it's absent.
-- Cold load: a `transcript` answer appends one `usage` event read from
-  `GET /session/{id}` after the parts and diff, so an opened session
-  shows its meter before anything new runs.
+- Cold load: a `transcript` answer appends one `usage` event after the
+  parts and diff, read from the last assistant message with non-zero
+  tokens in `GET /session/{id}/message` (cost from `GET /session/{id}`),
+  so an opened session shows its meter before anything new runs.
 
 ### `resume` / transcript
+- v1 request `{kind: "transcript", session, project, newestFirst?}` →
+  `part` events, then one `diff`, then one `usage`, then `done`. The Mac
+  reads `GET /session/{id}/message` once and derives all three from it
+  (on a long thread that document is megabytes; it used to be fetched
+  three times).
+- `newestFirst: true` asks for the parts in reverse order behind a
+  header `{kind: "transcript", newestFirst: true, count}`. This is how a
+  client opens a long thread on its newest turn at once: it paints the
+  first screen's worth as soon as it lands and merges the rest in
+  doubling batches above it (`TranscriptLoad` in RemoteKit), never one
+  part at a time. An older Mac ignores the flag and sends reading order
+  with no header; a client that asked treats "no header" as reading
+  order and paints once at the end. An older client never asks, so it
+  never sees reversed parts.
 - `GET /session/{id}/message?directory=…` → full transcript:
   `[{info: {id, role, time, summary?, agent, model}, parts: [...]}]`
   - Part types observed: `text`, `reasoning`, `tool` (with

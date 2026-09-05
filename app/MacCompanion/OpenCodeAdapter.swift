@@ -50,7 +50,7 @@ struct OpenCodeAdapter {
         guard let http = response as? HTTPURLResponse, (200 ..< 300).contains(http.statusCode) else {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             throw AdapterError.http(
-                path: path, body: Self.readableError(from: data, status: status)
+                path: path, status: status, body: Self.readableError(from: data, status: status)
             )
         }
         // Some endpoints answer with nothing — prompt_async is a 204 —
@@ -60,16 +60,35 @@ struct OpenCodeAdapter {
     }
 
     enum AdapterError: LocalizedError {
-        case http(path: String, body: String)
+        /// `status` 0 means no HTTP status existed: a synthesized error, or
+        /// a response with no usable status line.
+        case http(path: String, status: Int, body: String)
         case unknownCommand(String)
 
         var errorDescription: String? {
             switch self {
-            case let .http(path, body): return "OpenCode \(path): \(body)"
+            case let .http(path, _, body): return "OpenCode \(path): \(body)"
             case let .unknownCommand(name):
                 return "No command named \"/\(name)\" in OpenCode on this Mac."
             }
         }
+
+        /// Worth retrying without asking anyone. Rides Wire.Event.transient
+        /// out to clients and drives the scheduler's retry loop.
+        var isTransient: Bool {
+            switch self {
+            case let .http(_, status, _): return RetryPolicy.isTransientHTTPStatus(status)
+            case .unknownCommand: return false
+            }
+        }
+    }
+
+    /// The one classification callers use: adapter errors answer for
+    /// themselves, and a URLError (connection refused while OpenCode
+    /// restarts, a timed-out socket) is transient by nature.
+    static func isTransient(_ error: Error) -> Bool {
+        if let adapterError = error as? AdapterError { return adapterError.isTransient }
+        return error is URLError
     }
 
     /// OpenCode's errors arrive as `{"name":…,"data":{"message":…,"ref":…}}`.
@@ -109,7 +128,8 @@ struct OpenCodeAdapter {
         // flags become meaningful the first time a version drops or gates
         // one of these.
         return Capabilities(
-            opencodeVersion: health.version, permissions: true, questions: true, diffs: true
+            opencodeVersion: health.version, permissions: true, questions: true, diffs: true,
+            schedules: true
         )
     }
 
@@ -243,7 +263,7 @@ struct OpenCodeAdapter {
         switch builtin {
         case .summarize:
             guard let providerID, let modelID else {
-                throw AdapterError.http(path: "/summarize", body: "No model configured.")
+                throw AdapterError.http(path: "/summarize", status: 0, body: "No model configured.")
             }
             try await post(
                 "/session/\(sessionID)/summarize", directory: directory,
@@ -536,7 +556,7 @@ struct OpenCodeAdapter {
     func createSession(directory: String) async throws -> String {
         let json = try await post("/session", directory: directory) as? [String: Any] ?? [:]
         guard let id = json["id"] as? String else {
-            throw AdapterError.http(path: "/session", body: "no id in response")
+            throw AdapterError.http(path: "/session", status: 0, body: "no id in response")
         }
         return id
     }
@@ -611,13 +631,24 @@ struct OpenCodeAdapter {
 
     // MARK: - v1: transcript + diff
 
+    /// The session's message records, whole. The transcript, the per-turn
+    /// diffs and the context meter all read this one document, and on a
+    /// long thread it is megabytes: a cold load fetches it once and
+    /// derives the three from the same copy.
+    func messages(sessionID: String, directory: String) async throws -> [[String: Any]] {
+        try await get(
+            "/session/\(sessionID)/message", directory: directory
+        ) as? [[String: Any]] ?? []
+    }
+
     /// The durable per-turn diffs: user messages carry what their turn
     /// changed (`info.summary.diffs`).
     func turnDiffs(sessionID: String, directory: String) async throws -> [FileDiff] {
-        let messages = try await get(
-            "/session/\(sessionID)/message", directory: directory
-        ) as? [[String: Any]] ?? []
-        return messages.flatMap { message -> [FileDiff] in
+        turnDiffs(in: try await messages(sessionID: sessionID, directory: directory))
+    }
+
+    func turnDiffs(in messages: [[String: Any]]) -> [FileDiff] {
+        messages.flatMap { message -> [FileDiff] in
             let info = message["info"] as? [String: Any]
             let summary = info?["summary"] as? [String: Any]
             let diffs = summary?["diffs"] as? [[String: Any]] ?? []
@@ -635,11 +666,8 @@ struct OpenCodeAdapter {
     }
 
     /// Transcript flattened to protocol parts, for continuing a session.
-    func transcript(sessionID: String, directory: String) async throws -> [TurnPart] {
-        let messages = try await get(
-            "/session/\(sessionID)/message", directory: directory
-        ) as? [[String: Any]] ?? []
-        return messages.flatMap { message -> [TurnPart] in
+    func transcript(in messages: [[String: Any]]) -> [TurnPart] {
+        messages.flatMap { message -> [TurnPart] in
             let info = message["info"] as? [String: Any]
             let role = info?["role"] as? String ?? "assistant"
             let parts = message["parts"] as? [[String: Any]] ?? []
@@ -649,20 +677,41 @@ struct OpenCodeAdapter {
         }
     }
 
-    /// The session's running token totals for a cold load — the same
-    /// numbers `session.updated` streams live, read from the session
-    /// record itself. Nil while the session has never run a step.
-    func sessionUsage(sessionID: String, directory: String) async throws -> TurnUsage? {
-        let info = try await get(
+    /// The context meter's starting point for a cold load: the last
+    /// assistant step's token accounting, the same numbers
+    /// `message.updated` streams live. Nil while the session has never
+    /// completed a step.
+    ///
+    /// Not the session record's `tokens`: OpenCode sums that field over
+    /// every step the session has ever run, so on a long thread it reads
+    /// as millions against a 65k window. Only the latest step says how
+    /// full the window is now.
+    func sessionUsage(
+        in messages: [[String: Any]], sessionID: String, directory: String
+    ) async throws -> TurnUsage? {
+        guard let info = messages.reversed().lazy
+            .compactMap({ $0["info"] as? [String: Any] })
+            .first(where: { Self.usage(from: $0) != nil }),
+            var usage = Self.usage(from: info)
+        else { return nil }
+        usage.contextLimit = try? await contextLimit(for: info)
+        // Cost is the one number that is meant to accumulate; the session
+        // record carries the running total.
+        let session = try? await get(
             "/session/\(sessionID)", directory: directory
-        ) as? [String: Any] ?? [:]
-        guard var usage = Self.usage(from: info) else { return nil }
-        if let model = info["model"] as? [String: Any],
-           let providerID = model["providerID"] as? String,
-           let modelID = model["id"] as? String {
-            usage.contextLimit = (try? await contextLimits())?["\(providerID)/\(modelID)"]
-        }
+        ) as? [String: Any]
+        usage.cost = session?["cost"] as? Double
         return usage
+    }
+
+    /// The context window of the model an assistant message ran on
+    /// (`providerID` + `modelID` on the message record), nil when the
+    /// catalog doesn't know it.
+    func contextLimit(for message: [String: Any]) async throws -> Int? {
+        guard let providerID = message["providerID"] as? String,
+              let modelID = message["modelID"] as? String
+        else { return nil }
+        return try await contextLimits()["\(providerID)/\(modelID)"]
     }
 
     // MARK: - v1: event stream
@@ -670,12 +719,24 @@ struct OpenCodeAdapter {
     /// The instance's SSE feed as parsed dictionaries. One subscription per
     /// running turn is fine at this scale; consolidating to a single global
     /// subscription is an optimization for later.
-    func events(directory: String) -> AsyncThrowingStream<[String: Any], Error> {
+    ///
+    /// `onConnected` fires once the HTTP response has arrived, i.e. the
+    /// server is now delivering events to this subscriber. A caller that
+    /// invokes a prompt must wait for it: an image that fails to decode
+    /// emits its `session.error` within a second, and firing the prompt
+    /// before the stream is live loses that event to the race, leaving the
+    /// turn waiting for an idle that never comes. The stream buffers
+    /// everything from the moment it connects, so nothing after this point
+    /// is missed even before the consumer starts iterating.
+    func events(
+        directory: String, onConnected: (@Sendable () -> Void)? = nil
+    ) -> AsyncThrowingStream<[String: Any], Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 var components = URLComponents(string: base + "/event")!
                 components.queryItems = [URLQueryItem(name: "directory", value: directory)]
                 let (bytes, _) = try await URLSession.shared.bytes(from: components.url!)
+                onConnected?()
                 for try await line in bytes.lines {
                     guard line.hasPrefix("data: "),
                           let data = line.dropFirst(6).data(using: .utf8),
@@ -690,6 +751,28 @@ struct OpenCodeAdapter {
     }
 
     // MARK: - OpenCode → v1 mapping
+
+    /// A `session.error` event's real reason and whether it is worth a
+    /// retry. The payload shape (`{"error": {"name":…, "data": {"message":…}}}`)
+    /// has drifted before, so every lookup degrades: no readable message
+    /// falls back to a generic sentence, and anything unrecognized
+    /// classifies as NOT transient so a fatal error never loops.
+    static func sessionError(from properties: [String: Any]) -> (message: String, transient: Bool) {
+        let payload = properties["error"] as? [String: Any]
+        let name = payload?["name"] as? String
+        let data = payload?["data"] as? [String: Any]
+        let message = data?["message"] as? String ?? payload?["message"] as? String
+        // OpenCode's message can be a whole stack trace (an ImageDecodeError
+        // arrives with a dozen `at …` frames). The first line is the human
+        // reason; the frames are for its own log, not the phone.
+        let headline = message?
+            .split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+            .first
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        let text = (headline?.isEmpty == false ? headline : nil)
+            ?? name ?? "The agent hit an error on your Mac."
+        return (text, RetryPolicy.isTransientSessionError(name: name, message: message))
+    }
 
     /// `permission.asked` (1.18+) carries the request at `properties`;
     /// 1.16-era `permission.updated` did too. Both funnel here.
@@ -738,21 +821,24 @@ struct OpenCodeAdapter {
         return QuestionRequest(id: id, sessionID: body["sessionID"] as? String, questions: items)
     }
 
-    /// A session record's token accounting (`tokens` + `cost`, as carried
-    /// on `session.created`/`session.updated` and on `GET /session/{id}`)
-    /// → the phone's TurnUsage. Nil until something has actually run: the
-    /// all-zero record a fresh session carries means nothing yet, not
-    /// "the context is empty".
+    /// An assistant message's token accounting (`tokens`, as carried on
+    /// `message.updated` and on `GET /session/{id}/message`) → the
+    /// phone's TurnUsage. One step's input covers the whole conversation,
+    /// so these are the context meter. Nil for anything that isn't a
+    /// completed assistant step: user messages have no tokens, and a step
+    /// that was aborted before the model answered carries all zeros,
+    /// which means "no reading", not "the context is empty".
     static func usage(from info: [String: Any]) -> TurnUsage? {
-        guard let tokens = info["tokens"] as? [String: Any] else { return nil }
+        guard info["role"] as? String == "assistant",
+              let tokens = info["tokens"] as? [String: Any]
+        else { return nil }
         let cache = tokens["cache"] as? [String: Any]
         let usage = TurnUsage(
             input: tokens["input"] as? Int,
             output: tokens["output"] as? Int,
             reasoning: tokens["reasoning"] as? Int,
             cacheRead: cache?["read"] as? Int,
-            cacheWrite: cache?["write"] as? Int,
-            cost: info["cost"] as? Double
+            cacheWrite: cache?["write"] as? Int
         )
         return usage.total > 0 ? usage : nil
     }

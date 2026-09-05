@@ -8,6 +8,7 @@ import SwiftUI
 /// over loopback in v1, a chosen peer once multi-Mac pairing lands.
 struct WorkspaceWindow: View {
     @StateObject private var state = WorkspaceState()
+    @ObservedObject private var modelSources = ModelSourceStore.shared
 
     /// Enough of the selection to survive a relaunch: "session:<id>" or
     /// "project:<worktree>", re-matched against the loaded lists.
@@ -23,6 +24,16 @@ struct WorkspaceWindow: View {
         }
         .background(Color.canvas)
         .background(WindowAccessor { ActivationPolicy.shared.windowOpened($0) })
+        .toolbar {
+            ToolbarItem {
+                Button {
+                    state.selection = .schedules
+                } label: {
+                    Label("Scheduled Tasks", systemImage: "clock.badge")
+                }
+                .help("Scheduled tasks on this Mac")
+            }
+        }
         .overlay {
             if state.paletteShown {
                 ZStack(alignment: .top) {
@@ -55,7 +66,7 @@ struct WorkspaceWindow: View {
                 }
             case .project:
                 break   // already an empty conversation in that project
-            case nil:
+            case .schedules, .modelSources, nil:
                 if let first = state.projects.first { state.selection = .project(first) }
             }
         }
@@ -76,6 +87,17 @@ struct WorkspaceWindow: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: WorkspaceCommand.refresh)) { _ in
             Task { await state.load() }
+        }
+        // A rewritten config means a restarted OpenCode with a new
+        // catalogue; the composer's model menu must not keep the old one.
+        .onReceive(NotificationCenter.default.publisher(for: ModelSourceStore.applied)) { _ in
+            Task {
+                try? await Task.sleep(for: .seconds(3))
+                await state.models.load()
+            }
+        }
+        .onReceive(modelSources.$reviewRequested) { requested in
+            if requested, state.activePeer == nil { state.selection = .modelSources }
         }
         // Coming back to the app is the moment a session started elsewhere
         // (the OpenCode CLI in a terminal, the phone) should already be in
@@ -103,6 +125,8 @@ struct WorkspaceWindow: View {
         switch state.selection {
         case let .session(session): storedSelection = "session:\(session.id)"
         case let .project(project): storedSelection = "project:\(project.worktree)"
+        case .schedules: storedSelection = "schedules"
+        case .modelSources: storedSelection = "modelSources"
         case nil: storedSelection = ""
         }
     }
@@ -119,6 +143,10 @@ struct WorkspaceWindow: View {
             if let project = state.projects.first(where: { $0.worktree == worktree }) {
                 state.selection = .project(project)
             }
+        } else if storedSelection == "schedules" {
+            state.selection = .schedules
+        } else if storedSelection == "modelSources" {
+            state.selection = .modelSources
         }
     }
 
@@ -143,6 +171,14 @@ struct WorkspaceWindow: View {
                 title: project.displayName
             )
             .id(project.worktree)
+        case .schedules:
+            ScheduleListView(
+                store: state.schedules, models: state.models, projects: state.projects
+            ) { session in
+                state.selection = .session(session)
+            }
+        case .modelSources:
+            ModelSourcesView(store: modelSources)
         case nil:
             VStack(spacing: 16) {
                 BrandWordmark(height: 14, color: .inkFaint)

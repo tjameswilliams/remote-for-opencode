@@ -39,21 +39,29 @@ final class LiveTurns {
 
     private var runs: [String: Run] = [:]
     private let logger = Logger(subsystem: "com.timwilliams.opencodego", category: "turns")
+
+    /// Turns still producing events. Anything that would take OpenCode
+    /// down, such as a restart for a new config, waits for zero.
+    var activeCount: Int { runs.values.filter { !$0.done }.count }
     /// Finished turns linger this long for late resumes, then age out.
     private static let retention: TimeInterval = 15 * 60
 
     /// Starts a turn. `work` runs on the main actor with an `emit` that
     /// buffers each event and pushes it to whichever sink is current. The
     /// worker signals completion by emitting `done` (or `failed` + `done`).
+    /// A nil sink is a headless turn (the scheduler's): nothing streams
+    /// anywhere, and the moments that matter escalate to a push exactly as
+    /// they do for a backgrounded phone. Any client can still `resume` the
+    /// turn by id while it lingers.
     func start(
-        _ id: String, directory: String?, sink: TurnSink,
+        _ id: String, directory: String?, sink: TurnSink?,
         work: @escaping (_ emit: @escaping (Wire.Event) -> Void) async -> Void
     ) {
         prune()
         // The same phone retrying the same turn (a reconnect racing its own
         // resume) must not start the work twice.
         if let existing = runs[id] {
-            attach(existing, sink: sink, from: 0)
+            if let sink { attach(existing, sink: sink, from: 0) }
             return
         }
         let run = Run()
