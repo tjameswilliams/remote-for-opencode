@@ -20,19 +20,46 @@ struct OpenCodeAdapter {
 
     // MARK: - Plumbing
 
-    private func get(_ path: String, directory: String? = nil) async throws -> Any {
-        try await request(path, method: "GET", directory: directory, body: nil)
+    /// The session for one-shot requests. Separate from the event streams
+    /// (see `EventStreamHub`) so that no number of open streams can queue
+    /// a request behind them, and sized for a phone that fires several
+    /// requests at once on reconnect. The idle timeout is short on
+    /// purpose: a request that has gone quiet for this long is a stuck
+    /// server, and a `failed` the phone can show beats a spinner.
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpMaximumConnectionsPerHost = 16
+        config.timeoutIntervalForRequest = Self.requestTimeout
+        config.waitsForConnectivity = false
+        return URLSession(configuration: config)
+    }()
+
+    /// Seconds a request may go without any data before it fails.
+    static let requestTimeout: TimeInterval = 30
+    /// For the calls that block for a whole turn: `POST /command` returns
+    /// when the command has run, and a `/review` runs for minutes.
+    static let turnTimeout: TimeInterval = 15 * 60
+    /// The health check gates the handshake's `ready`; the phone waits four
+    /// seconds for that on the LAN, so a slow answer is as good as none.
+    static let healthTimeout: TimeInterval = 5
+
+    private func get(
+        _ path: String, directory: String? = nil, timeout: TimeInterval = Self.requestTimeout
+    ) async throws -> Any {
+        try await request(path, method: "GET", directory: directory, body: nil, timeout: timeout)
     }
 
     @discardableResult
     private func post(
-        _ path: String, directory: String? = nil, body: [String: Any]? = [:]
+        _ path: String, directory: String? = nil, body: [String: Any]? = [:],
+        timeout: TimeInterval = Self.requestTimeout
     ) async throws -> Any {
-        try await request(path, method: "POST", directory: directory, body: body)
+        try await request(path, method: "POST", directory: directory, body: body, timeout: timeout)
     }
 
     private func request(
-        _ path: String, method: String, directory: String?, body: [String: Any]?
+        _ path: String, method: String, directory: String?, body: [String: Any]?,
+        timeout: TimeInterval = Self.requestTimeout
     ) async throws -> Any {
         var components = URLComponents(string: base + path)!
         if let directory {
@@ -40,13 +67,13 @@ struct OpenCodeAdapter {
                 URLQueryItem(name: "directory", value: directory),
             ]
         }
-        var req = URLRequest(url: components.url!)
+        var req = URLRequest(url: components.url!, timeoutInterval: timeout)
         req.httpMethod = method
         if let body {
             req.httpBody = try JSONSerialization.data(withJSONObject: body)
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await Self.session.data(for: req)
         guard let http = response as? HTTPURLResponse, (200 ..< 300).contains(http.statusCode) else {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             throw AdapterError.http(
@@ -64,12 +91,16 @@ struct OpenCodeAdapter {
         /// a response with no usable status line.
         case http(path: String, status: Int, body: String)
         case unknownCommand(String)
+        /// An attachment no model could read, or a text file too large
+        /// to inline. Named by file, so the user knows which to drop.
+        case attachment(String)
 
         var errorDescription: String? {
             switch self {
             case let .http(path, _, body): return "OpenCode \(path): \(body)"
             case let .unknownCommand(name):
                 return "No command named \"/\(name)\" in OpenCode on this Mac."
+            case let .attachment(reason): return reason
             }
         }
 
@@ -78,7 +109,7 @@ struct OpenCodeAdapter {
         var isTransient: Bool {
             switch self {
             case let .http(_, status, _): return RetryPolicy.isTransientHTTPStatus(status)
-            case .unknownCommand: return false
+            case .unknownCommand, .attachment: return false
             }
         }
     }
@@ -118,7 +149,8 @@ struct OpenCodeAdapter {
     // MARK: - v1: status / capabilities
 
     func health() async throws -> (healthy: Bool, version: String) {
-        let json = try await get("/global/health") as? [String: Any] ?? [:]
+        let json = try await get("/global/health", timeout: Self.healthTimeout)
+            as? [String: Any] ?? [:]
         return (json["healthy"] as? Bool ?? false, json["version"] as? String ?? "unknown")
     }
 
@@ -267,7 +299,8 @@ struct OpenCodeAdapter {
             }
             try await post(
                 "/session/\(sessionID)/summarize", directory: directory,
-                body: ["providerID": providerID, "modelID": modelID]
+                body: ["providerID": providerID, "modelID": modelID],
+                timeout: Self.turnTimeout
             )
             return nil
         case .share:
@@ -354,16 +387,12 @@ struct OpenCodeAdapter {
         if let providerID, let modelID { body["model"] = "\(providerID)/\(modelID)" }
         if let agent { body["agent"] = agent }
         if !attachments.isEmpty {
-            body["parts"] = attachments.map { attachment in
-                [
-                    "type": "file",
-                    "mime": attachment.mime,
-                    "filename": attachment.name,
-                    "url": "data:\(attachment.mime);base64,\(attachment.data)",
-                ]
-            }
+            body["parts"] = try Self.parts(for: attachments)
         }
-        try await post("/session/\(sessionID)/command", directory: directory, body: body)
+        try await post(
+            "/session/\(sessionID)/command", directory: directory, body: body,
+            timeout: Self.turnTimeout
+        )
     }
 
     /// Agents a session can run as. Only primary, non-hidden ones —
@@ -445,10 +474,49 @@ struct OpenCodeAdapter {
         let rules = servers.filter { !$0.value }.keys.sorted().map { name in
             ["permission": Self.sanitizedMcp(name) + "_*", "pattern": "*", "action": "deny"]
         }
+        try await updateRules(sessionID: sessionID, directory: directory) { existing in
+            // Only the MCP switches are this call's to rewrite; a grant
+            // the user made from a permission card stays.
+            existing.filter { !Self.isMcpRule($0) } + rules
+        }
+    }
+
+    private static func isMcpRule(_ rule: [String: Any]) -> Bool {
+        (rule["permission"] as? String)?.hasSuffix("_*") == true
+            && rule["pattern"] as? String == "*"
+            && rule["action"] as? String == "deny"
+    }
+
+    /// Read-modify-write of the session's ruleset. PATCH replaces the
+    /// whole list, and two features now write to it (MCP switches and
+    /// permission grants), so each edits only its own rules.
+    private func updateRules(
+        sessionID: String, directory: String,
+        transform: ([[String: Any]]) -> [[String: Any]]
+    ) async throws {
+        let session = try await get("/session/\(sessionID)", directory: directory)
+            as? [String: Any] ?? [:]
+        let existing = session["permission"] as? [[String: Any]] ?? []
         try await request(
             "/session/\(sessionID)", method: "PATCH", directory: directory,
-            body: ["permission": rules]
+            body: ["permission": transform(existing)]
         )
+    }
+
+    /// Whitelist `patterns` for `permission` in this session, effective
+    /// for the very next tool call. Duplicates are replaced, not stacked.
+    func allow(
+        _ patterns: [String], for permission: String, sessionID: String, directory: String
+    ) async throws {
+        try await updateRules(sessionID: sessionID, directory: directory) { existing in
+            let kept = existing.filter { rule in
+                !(rule["permission"] as? String == permission
+                    && patterns.contains(rule["pattern"] as? String ?? ""))
+            }
+            return kept + patterns.map {
+                ["permission": permission, "pattern": $0, "action": "allow"]
+            }
+        }
     }
 
     func todos(sessionID: String, directory: String) async throws -> [TodoItem] {
@@ -572,17 +640,8 @@ struct OpenCodeAdapter {
         providerID: String, modelID: String, attachments: [Attachment] = [],
         agent: String? = nil
     ) async throws {
-        var parts: [[String: Any]] = [["type": "text", "text": text]]
-        // OpenCode takes file parts as data: URIs, so the bytes go straight
-        // through and nothing has to be hosted anywhere.
-        for attachment in attachments {
-            parts.append([
-                "type": "file",
-                "mime": attachment.mime,
-                "filename": attachment.name,
-                "url": "data:\(attachment.mime);base64,\(attachment.data)",
-            ])
-        }
+        let parts: [[String: Any]] = [["type": "text", "text": text]]
+            + (try Self.parts(for: attachments))
         var body: [String: Any] = [
             "model": ["providerID": providerID, "modelID": modelID],
             "parts": parts,
@@ -591,6 +650,38 @@ struct OpenCodeAdapter {
         try await post(
             "/session/\(sessionID)/prompt_async", directory: directory, body: body
         )
+    }
+
+    /// Attachments as OpenCode parts. Images and PDFs ride as file parts
+    /// with data: URIs (the bytes go straight through; nothing is hosted).
+    /// Text-like files go inline as text parts: the provider under
+    /// OpenCode rejects any other file media type, and a rejected part
+    /// stays in the thread's history, failing every turn after it.
+    static func parts(for attachments: [Attachment]) throws -> [[String: Any]] {
+        try attachments.map { attachment in
+            switch AttachmentDelivery.classify(attachment) {
+            case .image, .pdf:
+                return [
+                    "type": "file",
+                    "mime": attachment.mime,
+                    "filename": attachment.name,
+                    "url": "data:\(attachment.mime);base64,\(attachment.data)",
+                ]
+            case let .text(text):
+                return [
+                    "type": "text",
+                    "text": AttachmentDelivery.inlined(name: attachment.name, text: text),
+                ]
+            case .tooLarge:
+                throw AdapterError.attachment(
+                    "\(attachment.name) is too large to send as text (limit \(AttachmentDelivery.textLimit >> 10) KB)."
+                )
+            case .unreadable:
+                throw AdapterError.attachment(
+                    "\(attachment.name) isn't something the model can read. Send text files, images, or PDFs."
+                )
+            }
+        }
     }
 
     func abort(sessionID: String, directory: String) async throws {
@@ -606,14 +697,65 @@ struct OpenCodeAdapter {
         return list.compactMap(Self.permission(from:))
     }
 
+    /// Answers an ask. A grant is applied first, so the rule is in place
+    /// before the tool call proceeds, and then extended to every other
+    /// pending ask it already covers: a "whole project" grant made on the
+    /// second of four reads answers the other three too, rather than
+    /// surfacing three more cards for something the user just decided.
+    /// Returns true when the grant was written to the project's config.
+    @discardableResult
     func replyPermission(
-        id: String, directory: String, reply: String, message: String? = nil
-    ) async throws {
+        id: String, directory: String, reply: String, message: String? = nil,
+        grant: PermissionGrant? = nil
+    ) async throws -> Bool {
+        var reply = reply
+        var persisted = false
+        var covered: [PermissionRequest] = []
+        if let grant, reply != "reject", !grant.patterns.isEmpty {
+            let pending = try await pendingPermissions(directory: directory)
+            let ask = pending.first { $0.id == id }
+            if let sessionID = ask?.sessionID {
+                try await allow(
+                    grant.patterns, for: grant.permission, sessionID: sessionID, directory: directory
+                )
+            }
+            if grant.persist {
+                let path = PermissionConfig.projectPath(for: directory)
+                let root = try OpenCodeConfigFile.read(at: path)
+                try OpenCodeConfigFile.write(
+                    PermissionConfig.allowing(grant.patterns, for: grant.permission, in: root),
+                    to: path
+                )
+                persisted = true
+            }
+            // OpenCode's own "always" whitelists what it suggested; keep
+            // it only when that is exactly what the user chose, so the
+            // session never ends up holding two different answers.
+            if grant.patterns != ask?.always { reply = "once" }
+            covered = pending.filter { other in
+                other.id != id && other.sessionID == ask?.sessionID
+                    && other.permission == grant.permission
+                    && Self.isCovered(other, by: grant.patterns)
+            }
+        }
         var body: [String: Any] = ["reply": reply]
         // A rejection with direction reaches the agent as guidance rather
         // than a bare no.
         if let message, !message.isEmpty { body["message"] = message }
         try await post("/permission/\(id)/reply", directory: directory, body: body)
+        for other in covered {
+            try? await post("/permission/\(other.id)/reply", directory: directory, body: ["reply": "once"])
+        }
+        return persisted
+    }
+
+    /// True when every pattern the ask is about falls under the grant.
+    static func isCovered(_ ask: PermissionRequest, by patterns: [String]) -> Bool {
+        let subjects = ask.patterns ?? []
+        guard !subjects.isEmpty else { return false }
+        return subjects.allSatisfy { subject in
+            patterns.contains { PermissionScopes.matches(pattern: $0, subject) }
+        }
     }
 
     // MARK: - v1: question
@@ -716,35 +858,43 @@ struct OpenCodeAdapter {
 
     // MARK: - v1: event stream
 
-    /// The instance's SSE feed as parsed dictionaries. One subscription per
-    /// running turn is fine at this scale; consolidating to a single global
-    /// subscription is an optimization for later.
+    /// The instance's SSE feed as parsed dictionaries.
     ///
-    /// `onConnected` fires once the HTTP response has arrived, i.e. the
-    /// server is now delivering events to this subscriber. A caller that
+    /// One socket per instance, however many callers: the feed is shared
+    /// through `EventStreamHub`, so a phone reconnecting twenty times in
+    /// an evening costs twenty subscriptions and one connection. Each
+    /// caller still gets its own ordered stream, carrying everything from
+    /// the moment it subscribed, that ends when the server goes away,
+    /// exactly as if it held the socket itself.
+    ///
+    /// `onConnected` fires once the socket is open and delivering events
+    /// to this subscriber, at once if it already was. A caller that
     /// invokes a prompt must wait for it: an image that fails to decode
     /// emits its `session.error` within a second, and firing the prompt
     /// before the stream is live loses that event to the race, leaving the
-    /// turn waiting for an idle that never comes. The stream buffers
-    /// everything from the moment it connects, so nothing after this point
-    /// is missed even before the consumer starts iterating.
+    /// turn waiting for an idle that never comes.
     func events(
         directory: String, onConnected: (@Sendable () -> Void)? = nil
-    ) -> AsyncThrowingStream<[String: Any], Error> {
-        AsyncThrowingStream { continuation in
+    ) async -> AsyncThrowingStream<[String: Any], Error> {
+        var components = URLComponents(string: base + "/event")!
+        components.queryItems = [URLQueryItem(name: "directory", value: directory)]
+        let payloads = await EventStreamHub.shared.subscribe(
+            components.url!, onConnected: onConnected
+        )
+        return AsyncThrowingStream { continuation in
             let task = Task {
-                var components = URLComponents(string: base + "/event")!
-                components.queryItems = [URLQueryItem(name: "directory", value: directory)]
-                let (bytes, _) = try await URLSession.shared.bytes(from: components.url!)
-                onConnected?()
-                for try await line in bytes.lines {
-                    guard line.hasPrefix("data: "),
-                          let data = line.dropFirst(6).data(using: .utf8),
-                          let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                    else { continue }
-                    continuation.yield(event)
+                do {
+                    for try await payload in payloads {
+                        guard let data = payload.data(using: .utf8),
+                              let event = try? JSONSerialization.jsonObject(with: data)
+                                  as? [String: Any]
+                        else { continue }
+                        continuation.yield(event)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
                 }
-                continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
         }
@@ -786,7 +936,7 @@ struct OpenCodeAdapter {
             patterns = [command]
         }
         let kind = body["permission"] as? String ?? body["type"] as? String
-        return PermissionRequest(
+        var request = PermissionRequest(
             id: id,
             sessionID: body["sessionID"] as? String,
             permission: kind,
@@ -794,6 +944,13 @@ struct OpenCodeAdapter {
             always: body["always"] as? [String],
             risk: PermissionRisk.classify(permission: kind, patterns: patterns).rawValue
         )
+        // The wider grants the card can offer. Worked out here, on the
+        // machine that can see whether a folder sits inside a repository.
+        let scopes = PermissionScopes.candidates(for: request) { path in
+            PermissionScopes.projectRoot(containing: path)
+        }
+        request.scopes = scopes.isEmpty ? nil : scopes
+        return request
     }
 
     /// A question request, from the poll endpoint or a `question.asked`

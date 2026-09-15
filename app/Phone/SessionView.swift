@@ -83,8 +83,8 @@ struct SessionView: View {
             ChangesView(project: turn.project)
         }
         .sheet(item: $turn.permission) { request in
-            PermissionSheet(request: request) { reply, message in
-                turn.answer(request, reply: reply, message: message)
+            PermissionSheet(request: request, queued: turn.queuedPermissions) { answer in
+                turn.answer(request, with: answer)
             }
         }
         .sheet(item: $turn.question) { request in

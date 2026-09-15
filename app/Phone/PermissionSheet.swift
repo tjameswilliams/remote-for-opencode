@@ -15,11 +15,17 @@ import SwiftUI
 /// not look the same.
 struct PermissionSheet: View {
     let request: PermissionRequest
+    /// Asks waiting behind this one. Said out loud so "always" is chosen
+    /// knowing it will cover the rest, and "once" knowing it will not.
+    var queued = 0
     /// reply, plus an optional message when the user redirects instead of
     /// simply refusing.
-    let reply: (String, String?) -> Void
+    let reply: (PermissionAnswer) -> Void
 
     @State private var confirmingAlways = false
+    @State private var choosingScope = false
+    @State private var scopeID: String?
+    @State private var remember = false
     @State private var redirecting = false
     @State private var redirection = ""
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -32,7 +38,7 @@ struct PermissionSheet: View {
                 VStack(alignment: .leading, spacing: 16) {
                     header
                     command
-                    if redirecting { redirectField } else { scopeNote }
+                    if redirecting { redirectField } else if choosingScope { scopePicker } else { scopeNote }
                 }
                 .padding(20)
             }
@@ -54,6 +60,11 @@ struct PermissionSheet: View {
                 .font(.headline)
                 .foregroundStyle(Color.ink)
             Spacer()
+            if queued > 0 {
+                Text("\(queued) more waiting")
+                    .font(.caption)
+                    .foregroundStyle(Color.inkMuted)
+            }
         }
     }
 
@@ -118,29 +129,47 @@ struct PermissionSheet: View {
     private var actions: some View {
         VStack(spacing: 10) {
             if redirecting {
-                Button("Reject") { reply("reject", redirection.isEmpty ? nil : redirection) }
+                Button("Reject") { reply(PermissionAnswer(reply: "reject", message: redirection.isEmpty ? nil : redirection)) }
                     .buttonStyle(Primary(tint: .negative))
                 Button("Back") { redirecting = false }
+                    .buttonStyle(Secondary())
+            } else if choosingScope {
+                Button(remember ? "Allow and Remember" : "Allow") { grantSelected() }
+                    .buttonStyle(Primary(tint: .clay))
+                    .disabled(selectedScope == nil)
+                Button("Back") { choosingScope = false }
                     .buttonStyle(Secondary())
             } else if confirmingAlways {
                 Text("Allow every \(request.permission ?? "action") like this until OpenCode restarts?")
                     .font(.footnote)
                     .foregroundStyle(Color.inkMuted)
                     .multilineTextAlignment(.center)
-                Button("Yes, allow always") { reply("always", nil) }
+                Button("Yes, allow always") { reply(PermissionAnswer(reply: "always")) }
                     .buttonStyle(Primary(tint: .clay))
                 Button("Back") { confirmingAlways = false }
                     .buttonStyle(Secondary())
             } else {
-                Button("Allow Once") { reply("once", nil) }
+                Button("Allow Once") { reply(PermissionAnswer(reply: "once")) }
                     .buttonStyle(Primary(tint: .clay))
                 // Reject sits apart from Allow on purpose: adjacent 44pt
                 // targets for consequential opposites is a known hazard.
                 HStack(spacing: 10) {
                     Button("Reject…") { redirecting = true }
                         .buttonStyle(Secondary())
-                    // High-risk asks don't offer a blanket grant at all.
-                    if risk != .high {
+                    if let scopes = request.scopes, !scopes.isEmpty {
+                        // The Mac worked out what "always" could mean here;
+                        // the choice is the user's. Scopes exist only for
+                        // asks that are safe to widen, so risk is already
+                        // in the list.
+                        Button("Allow…") {
+                            scopeID = scopes.first?.id
+                            choosingScope = true
+                        }
+                        .buttonStyle(Secondary())
+                    } else if risk != .high {
+                        // An older companion sends no scopes: OpenCode's
+                        // own "always" is the one blanket grant on offer,
+                        // and never for a high-risk ask.
                         Button("Always") { confirmingAlways = true }
                             .buttonStyle(Secondary())
                     }
@@ -151,6 +180,65 @@ struct PermissionSheet: View {
         .background(.bar)
         .animation(Motion.easeOut(Motion.feedback), value: redirecting)
         .animation(Motion.easeOut(Motion.feedback), value: confirmingAlways)
+        .animation(Motion.easeOut(Motion.feedback), value: choosingScope)
+    }
+
+    // MARK: - Scope
+
+    private var selectedScope: PermissionScope? {
+        request.scopes?.first { $0.id == scopeID }
+    }
+
+    private func grantSelected() {
+        guard let scope = selectedScope else { return }
+        reply(PermissionAnswer(
+            reply: "always",
+            grant: PermissionGrant(
+                permission: request.permission ?? "", patterns: scope.patterns, persist: remember
+            )
+        ))
+    }
+
+    /// Which grant, and for how long. Narrowest first, the narrowest
+    /// preselected: widening is a deliberate tap, never the default.
+    private var scopePicker: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Allow, and stop asking for")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(Color.inkMuted)
+            ForEach(request.scopes ?? []) { scope in
+                Button { scopeID = scope.id } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: scopeID == scope.id ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(scopeID == scope.id ? Color.clay : Color.inkMuted)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(scope.label)
+                                .foregroundStyle(Color.ink)
+                            Text(scope.patterns.joined(separator: "\n"))
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(Color.inkMuted)
+                                .lineLimit(2)
+                                .truncationMode(.head)
+                        }
+                        Spacer()
+                    }
+                    .padding(12)
+                    .background(
+                        RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                            .fill(Color.surface)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+            Toggle("Remember on this Mac", isOn: $remember)
+                .tint(Color.clay)
+                .foregroundStyle(Color.ink)
+            Text(remember
+                ? "Saved to this project's opencode.json, for every conversation. This conversation has it now; the rest after OpenCode next restarts."
+                : "This conversation only, until OpenCode restarts.")
+                .font(.footnote)
+                .foregroundStyle(Color.inkMuted)
+        }
     }
 
     private struct Primary: ButtonStyle {

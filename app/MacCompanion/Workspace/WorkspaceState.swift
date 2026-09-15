@@ -67,11 +67,83 @@ final class WorkspaceState: ObservableObject {
     }
 
     @Published var projects: [Project] = []
-    @Published var sessions: [Session] = []
+    /// The sidebar's sessions. The selection holds a whole `Session` (the
+    /// row tags do too), so a refreshed list with a new title or timestamp
+    /// would silently stop matching the selected row and the highlight
+    /// would vanish; every replacement re-points the selection at the
+    /// list's copy of the same conversation.
+    @Published var sessions: [Session] = [] {
+        didSet { syncSelection() }
+    }
     @Published var error: String?
     @Published var loading = false
     @Published var search = ""
-    @Published var selection: WorkspaceSelection?
+    @Published var selection: WorkspaceSelection? {
+        didSet { paneKey = Self.paneKey(from: oldValue, to: selection, adopting: adopting, keeping: paneKey) }
+    }
+
+    /// The center pane's identity. A new value tears the conversation pane
+    /// down and builds it fresh (new controller, cold transcript), which is
+    /// right whenever the selection moves to another conversation, and
+    /// wrong in exactly one case: a fresh conversation that has just been
+    /// given its session id, whose pane is streaming that very turn.
+    ///
+    /// Deliberately not `@Published`: it changes only inside `selection`'s
+    /// observer, whose own publish already redraws the window, and a
+    /// second publish from inside the first is exactly the "publishing
+    /// changes from within view updates" SwiftUI warns about, with a
+    /// layout loop as the way that undefined behavior showed up.
+    private(set) var paneKey = UUID()
+    /// The session id a fresh pane is in the middle of adopting; see `adopt`.
+    private var adopting: String?
+
+    private static func paneKey(
+        from old: WorkspaceSelection?, to new: WorkspaceSelection?,
+        adopting: String?, keeping key: UUID
+    ) -> UUID {
+        guard case let .session(target) = new else { return UUID() }
+        // Same conversation, refreshed record (title, timestamp): same pane.
+        if case let .session(previous) = old, previous.id == target.id { return key }
+        if target.id == adopting { return key }
+        return UUID()
+    }
+
+    /// Re-point the selection at the list's copy of the selected session,
+    /// so the sidebar highlight and the pane's title follow every rename
+    /// and refresh. Same id, so the pane itself stays put.
+    private func syncSelection() {
+        guard case let .session(selected) = selection,
+              let fresh = sessions.first(where: { $0.id == selected.id }),
+              fresh != selected
+        else { return }
+        selection = .session(fresh)
+    }
+
+    /// A conversation started from a project row has just been given its
+    /// session by the Mac. It joins the sidebar at once, under its project,
+    /// as the selected row, and the pane that is streaming its first turn
+    /// is kept rather than rebuilt around the new selection. The title is
+    /// OpenCode's to give; `retitle` lands it when it arrives.
+    func adopt(session id: String, in project: Project) {
+        if !sessions.contains(where: { $0.id == id }) {
+            sessions.insert(
+                Session(id: id, directory: project.worktree, updated: Date()), at: 0
+            )
+        }
+        guard let session = sessions.first(where: { $0.id == id }) else { return }
+        adopting = id
+        selection = .session(session)
+        adopting = nil
+    }
+
+    /// The Mac reported a title for a session (OpenCode named it, or
+    /// someone renamed it elsewhere); the sidebar row follows.
+    func retitle(session id: String, to title: String) {
+        guard let index = sessions.firstIndex(where: { $0.id == id }),
+              sessions[index].title != title
+        else { return }
+        sessions[index].title = title
+    }
 
     // Window-level UI state, here so menu commands (which live outside the
     // view tree) and the panes both reach one truth.

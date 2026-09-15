@@ -101,10 +101,16 @@ public struct PermissionRequest: Codable, Equatable, Identifiable, Sendable {
     /// habituation — varying presentation by risk is the empirically
     /// supported answer.
     public var risk: String?
+    /// Wider grants the Mac worked out for this ask (the whole project,
+    /// every `git` command), narrowest first. Absent from an older
+    /// companion, in which case the card offers only OpenCode's own
+    /// "always".
+    public var scopes: [PermissionScope]?
 
     public init(
         id: String, sessionID: String? = nil, permission: String? = nil,
-        patterns: [String]? = nil, always: [String]? = nil, risk: String? = nil
+        patterns: [String]? = nil, always: [String]? = nil, risk: String? = nil,
+        scopes: [PermissionScope]? = nil
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -112,6 +118,7 @@ public struct PermissionRequest: Codable, Equatable, Identifiable, Sendable {
         self.patterns = patterns
         self.always = always
         self.risk = risk
+        self.scopes = scopes
     }
 
     public enum Risk: String {

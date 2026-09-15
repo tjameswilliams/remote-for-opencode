@@ -15,6 +15,11 @@ import SwiftUI
 final class TurnController: ObservableObject {
     let project: String
     @Published private(set) var session: String?
+    /// What the Mac says the session is called, as it changes: nil until
+    /// a status event carries one. A thread started here is created under
+    /// OpenCode's placeholder and named after its first answer, and the
+    /// owner of the sidebar entry wants to hear about both.
+    @Published private(set) var title: String?
 
     /// The transcript as rendered: parts keyed by id so a re-sent snapshot
     /// updates in place instead of duplicating.
@@ -29,6 +34,10 @@ final class TurnController: ObservableObject {
     @Published private(set) var loading = false
     @Published var error: String?
     @Published var permission: PermissionRequest?
+    /// Asks queued behind `permission`, so the card can say so. A model
+    /// that reads four files at once raises four asks, and a card that
+    /// looked like the only one would be answered as if it were.
+    @Published private(set) var queuedPermissions = 0
     @Published var question: QuestionRequest?
     /// When the running turn began — the working indicator escalates its
     /// wording against this.
@@ -165,10 +174,12 @@ final class TurnController: ObservableObject {
             switch event.kind {
             case "status":
                 if let id = event.session { session = id }
+                if let title = event.title { self.title = title }
             case "part":
                 if let part = event.part { upsert(part) }
             case "permission":
                 permission = event.permission
+                queuedPermissions = max(0, (event.permissions?.count ?? 0) - 1)
             case "question":
                 question = event.question
             case "diff":
@@ -260,6 +271,8 @@ final class TurnController: ObservableObject {
     /// otherwise healthy transcript red.
     private func handleWatch(_ event: Wire.Event) {
         switch event.kind {
+        case "status":
+            if let title = event.title { self.title = title }
         case "part":
             guard let part = event.part else { return }
             // Our own prompt echoes back through the watch while a turn is
@@ -280,6 +293,7 @@ final class TurnController: ObservableObject {
             // Nil payload means the ask was answered somewhere else — the
             // TUI, another device — and the card comes down.
             permission = event.permission
+            queuedPermissions = max(0, (event.permissions?.count ?? 0) - 1)
         case "question":
             question = event.question
         case "idle":
@@ -296,16 +310,17 @@ final class TurnController: ObservableObject {
 
     // MARK: - Approvals
 
-    func answer(_ request: PermissionRequest, reply: String, message: String?) {
+    func answer(_ request: PermissionRequest, with answer: PermissionAnswer) {
         Task {
             // Biometrics stand in front of granting, never of declining.
-            if reply != "reject", await !Approver.confirm() { return }
+            if answer.reply != "reject", await !Approver.confirm() { return }
             permission = nil
             var wire = Wire.Request(kind: "permission")
             wire.permissionID = request.id
             wire.project = project
-            wire.reply = reply
-            wire.message = message
+            wire.reply = answer.reply
+            wire.message = answer.message
+            wire.grant = answer.grant
             for await event in makeLink().run(wire) where event.kind == "failed" {
                 error = event.text
             }

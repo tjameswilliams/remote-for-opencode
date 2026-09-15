@@ -144,7 +144,7 @@ struct StatusMenu: View {
                     modelSources.reviewRequested = true
                 }
             } else if modelSources.restartNeeded {
-                Button("Restart OpenCode for New Models") { modelSources.restartNow() }
+                Button("Restart OpenCode to Apply Changes") { modelSources.restartNow() }
             }
             Divider()
             Button("Open Workspace") {

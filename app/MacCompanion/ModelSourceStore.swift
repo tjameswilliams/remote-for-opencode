@@ -293,6 +293,15 @@ final class ModelSourceStore: ObservableObject {
         NotificationCenter.default.post(name: Self.applied, object: nil)
     }
 
+    /// Something else changed a config OpenCode reads at startup (a
+    /// permission grant saved to a project's opencode.json). Only the
+    /// offer: an automatic restart would cut off a turn the TUI is
+    /// running that this app cannot see, and the change is already live
+    /// in the session that asked.
+    func noteRestartNeeded() {
+        restartNeeded = true
+    }
+
     /// The user's explicit restart from the pane, turns or no turns.
     func restartNow() {
         restartNeeded = false

@@ -78,7 +78,7 @@ final class RemoteServer: ObservableObject {
         }
         guard listener == nil else { return }
         do {
-            let params = NWParameters.tcp
+            let params = NWParameters.wire
             params.includePeerToPeer = true
             let listener = try NWListener(
                 using: params,
@@ -575,9 +575,13 @@ private final class Connection {
             guard let id = request.permissionID, let directory = request.project,
                   let reply = request.reply
             else { return [] }
-            try await adapter.replyPermission(
-                id: id, directory: directory, reply: reply, message: request.message
+            let persisted = try await adapter.replyPermission(
+                id: id, directory: directory, reply: reply, message: request.message,
+                grant: request.grant
             )
+            // A rule written to opencode.json is read at startup only. The
+            // session already has it; the offer to restart covers the rest.
+            if persisted { ModelSourceStore.shared.noteRestartNeeded() }
             return []
         }
     }
@@ -613,10 +617,21 @@ actor InvocationFailure {
 
 /// Records when a turn last made progress, so a watchdog can tell a slow
 /// model from a dead one. Reset on every event for the turn's own session.
+///
+/// Held while the turn is waiting on a person: a permission card or a
+/// question is silence by design, and a human taking three minutes to
+/// read a diff must not be reported as a model that stopped answering.
 actor ActivityClock {
     private var last = Date()
+    private var held = false
     func touch() { last = Date() }
-    func idleSeconds() -> TimeInterval { Date().timeIntervalSince(last) }
+    func hold(_ waiting: Bool) {
+        held = waiting
+        last = Date()
+    }
+    func stalled(after timeout: TimeInterval) -> Bool {
+        !held && Date().timeIntervalSince(last) >= timeout
+    }
 }
 
 /// A one-shot gate: `wait` returns the moment `open` is called, or when the
@@ -764,7 +779,7 @@ enum TurnRunner {
             // through to the pump's own stream-ended handling rather than
             // blocking here.
             let connected = AsyncStreamGate()
-            let events = adapter.events(directory: directory) {
+            let events = await adapter.events(directory: directory) {
                 Task { await connected.open() }
             }
             await connected.wait(timeout: .seconds(5))
@@ -823,13 +838,15 @@ enum TurnRunner {
                     try await pump(
                         events, sessionID: sessionID, directory: directory, adapter: adapter,
                         failure: failure, stopAtIdle: true,
-                        onActivity: { Task { await clock.touch() } }, emit: emit
+                        onActivity: { Task { await clock.touch() } },
+                        onWaiting: { waiting in Task { await clock.hold(waiting) } },
+                        emit: emit
                     )
                 }
                 group.addTask {
                     while true {
                         try await Task.sleep(for: .seconds(15))
-                        if await clock.idleSeconds() >= Self.stallTimeout {
+                        if await clock.stalled(after: Self.stallTimeout) {
                             throw StallTimeout()
                         }
                     }
@@ -873,7 +890,7 @@ enum TurnRunner {
         while !Task.isCancelled {
             // Re-resolved each pass: a restarted OpenCode is a new port.
             if let adapter = adapter() {
-                let events = adapter.events(directory: directory)
+                let events = await adapter.events(directory: directory)
                 _ = try? await pump(
                     events, sessionID: sessionID, directory: directory, adapter: adapter,
                     failure: nil, stopAtIdle: false, emit: emit
@@ -906,6 +923,7 @@ enum TurnRunner {
         sessionID: String, directory: String, adapter: OpenCodeAdapter,
         failure: InvocationFailure?, stopAtIdle: Bool,
         onActivity: (@Sendable () -> Void)? = nil,
+        onWaiting: (@Sendable (Bool) -> Void)? = nil,
         emit: @escaping (Wire.Event) -> Void
     ) async throws -> PumpEnd {
         func fail(_ message: String, transient: Bool = false) {
@@ -916,12 +934,38 @@ enum TurnRunner {
             emit(Wire.Event(kind: "done"))
         }
 
+        // The session's asks, oldest first, as one event: the front of the
+        // queue is the card to show, the whole list is the "2 more waiting"
+        // behind it. Sent whenever the queue changes rather than per ask,
+        // because a model that reads four files at once raises four asks
+        // in two seconds, and a client showing "the latest ask" would let
+        // the first three fall out of sight while OpenCode waits on them
+        // forever. `justAsked` covers the ask whose event brought us here
+        // in case the poll endpoint has not listed it yet.
+        func emitPermissionQueue(justAsked: PermissionRequest? = nil) async {
+            var pending = ((try? await adapter.pendingPermissions(directory: directory)) ?? [])
+                .filter { $0.sessionID == nil || $0.sessionID == sessionID }
+            if let justAsked, !pending.contains(where: { $0.id == justAsked.id }) {
+                pending.append(justAsked)
+            }
+            pending.sort { $0.id < $1.id }
+            var e = Wire.Event(kind: "permission")
+            e.permission = pending.first
+            e.permissions = pending.isEmpty ? nil : pending
+            e.session = sessionID
+            emit(e)
+            onWaiting?(!pending.isEmpty)
+        }
+
         // Which message each part belongs to, and whose it is. The part
         // events don't carry a role, and the user's own message streams
         // back through the same channel as the agent's — without this,
         // the prompt appears a second time in the transcript as if the
         // agent had said it.
         var roles: [String: String] = [:]
+        /// The last title relayed, so a session.updated fired for some
+        /// other field (cost, timestamps) does not re-announce the name.
+        var lastTitle: String?
         // Text accumulated per part from the delta stream, and each
         // part's type. Reasoning only ever gets two
         // `message.part.updated` events — one empty at the start and
@@ -1011,12 +1055,21 @@ enum TurnRunner {
                 e.session = sessionID
                 emit(e)
             case "session.created", "session.updated":
-                // Only the accumulated cost is read off the session record;
-                // it rides along on the next usage event.
-                if let info = properties["info"] as? [String: Any],
-                   info["id"] as? String == sessionID,
-                   let cost = info["cost"] as? Double {
-                    sessionCost = cost
+                guard let info = properties["info"] as? [String: Any],
+                      info["id"] as? String == sessionID
+                else { continue }
+                // The accumulated cost rides along on the next usage event.
+                if let cost = info["cost"] as? Double { sessionCost = cost }
+                // The title is relayed as it changes: OpenCode creates a
+                // session under a placeholder and names it once the first
+                // answer is in, and a client that opened the thread fresh
+                // has no other way to learn what it is now called.
+                if let title = info["title"] as? String, !title.isEmpty, title != lastTitle {
+                    lastTitle = title
+                    var e = Wire.Event(kind: "status")
+                    e.session = sessionID
+                    e.title = title
+                    emit(e)
                 }
             case "message.part.updated":
                 guard let part = properties["part"] as? [String: Any],
@@ -1059,22 +1112,15 @@ enum TurnRunner {
                 guard let mapped = OpenCodeAdapter.permission(from: properties),
                       mapped.sessionID == nil || mapped.sessionID == sessionID
                 else { continue }
-                var e = Wire.Event(kind: "permission")
-                e.permission = mapped
-                e.session = sessionID
-                emit(e)
+                await emitPermissionQueue(justAsked: mapped)
             case "permission.replied":
-                // Watches only: the ask was answered somewhere else
-                // (the TUI, another device), so take the card down — a
-                // bare permission event with no payload is the clear.
-                // Prompt turns skip this; their replies come from the
-                // client that is showing the card.
-                guard !stopAtIdle,
-                      properties["sessionID"] as? String ?? sessionID == sessionID
+                // One ask answered, here or anywhere (the TUI, another
+                // device): the next one in the queue goes up, and a bare
+                // permission event with no payload takes the card down
+                // when the queue is empty.
+                guard properties["sessionID"] as? String ?? sessionID == sessionID
                 else { continue }
-                var e = Wire.Event(kind: "permission")
-                e.session = sessionID
-                emit(e)
+                await emitPermissionQueue()
             case "message.part.delta":
                 // `{sessionID, messageID, partID, field, delta}` —
                 // the actual token stream, for both reasoning and the
@@ -1109,6 +1155,11 @@ enum TurnRunner {
                 e.question = mapped
                 e.session = sessionID
                 emit(e)
+                onWaiting?(true)
+            case "question.replied":
+                guard properties["sessionID"] as? String ?? sessionID == sessionID
+                else { continue }
+                onWaiting?(false)
             case "session.error":
                 guard properties["sessionID"] as? String == sessionID else { continue }
                 // The event's payload is the only place the real reason

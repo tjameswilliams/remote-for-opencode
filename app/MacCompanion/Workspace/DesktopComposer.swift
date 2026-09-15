@@ -40,6 +40,7 @@ struct DesktopComposer: View {
                 .lineLimit(1 ... 10)
                 .focused($focused)
                 .onSubmit(onSend)
+                .onChange(of: input) { old, new in liftLargeInsertion(from: old, to: new) }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 8) {
@@ -99,7 +100,9 @@ struct DesktopComposer: View {
         .task { focused = true }
         .onAppear {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                breakLine(event)
+                guard focused else { return event }
+                if isPasteKey(event), liftPasteboardText() { return nil }
+                return breakLine(event)
             }
         }
         .onDisappear {
@@ -130,6 +133,53 @@ struct DesktopComposer: View {
             charactersIgnoringModifiers: event.charactersIgnoringModifiers ?? "\r",
             isARepeat: event.isARepeat, keyCode: event.keyCode
         ) ?? event
+    }
+
+    // MARK: - Large pastes
+
+    /// ⌘V, and nothing else: Paste and Match Style (⌥⇧⌘V) and the Edit
+    /// menu reach the field directly and are caught by `liftLargeInsertion`.
+    private func isPasteKey(_ event: NSEvent) -> Bool {
+        event.modifierFlags.intersection([.shift, .command, .option, .control]) == .command
+            && event.charactersIgnoringModifiers?.lowercased() == "v"
+    }
+
+    /// A large block of text on the pasteboard becomes a chip instead of
+    /// landing in the field, the convention the terminal agents use: the
+    /// field never lays out a wall of log output, and the chip is removed
+    /// like any attachment. Returns false when the paste should proceed
+    /// as usual, short text and anything the image and file handlers own.
+    private func liftPasteboardText() -> Bool {
+        let pasteboard = NSPasteboard.general
+        if pasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+            || pasteboard.canReadObject(forClasses: [NSImage.self], options: nil) {
+            return false
+        }
+        guard let text = pasteboard.string(forType: .string),
+              PromptAttachments.isLargePaste(text)
+        else { return false }
+        attachments.add(pastedText: text)
+        return true
+    }
+
+    /// A large insertion that got past the key monitor (the Edit menu, a
+    /// dropped text clipping, Paste and Match Style) is lifted out after
+    /// the fact: the field takes one slow layout instead of one per
+    /// keystroke from then on. Typing never inserts this much at once.
+    private func liftLargeInsertion(from old: String, to new: String) {
+        guard new.count - old.count > PromptAttachments.pasteCharacterLimit else { return }
+        let before = Array(old), after = Array(new)
+        var prefix = 0
+        while prefix < before.count, prefix < after.count, before[prefix] == after[prefix] { prefix += 1 }
+        var suffix = 0
+        while suffix < before.count - prefix, suffix < after.count - prefix,
+              before[before.count - 1 - suffix] == after[after.count - 1 - suffix] {
+            suffix += 1
+        }
+        let inserted = String(after[prefix ..< after.count - suffix])
+        guard PromptAttachments.isLargePaste(inserted) else { return }
+        attachments.add(pastedText: inserted)
+        input = old
     }
 
     private var addButton: some View {

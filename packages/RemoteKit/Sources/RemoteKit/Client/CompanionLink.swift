@@ -130,7 +130,7 @@ public final class CompanionLink {
         continuation: AsyncStream<Wire.Event>.Continuation
     ) async {
         let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .init(rawValue: Wire.port)!)
-        let lan = TCPTransport(NWConnection(to: endpoint, using: .tcp))
+        let lan = TCPTransport(NWConnection(to: endpoint, using: .wire))
         transport = lan
         switch await exchange(
             over: lan, channelKey: key, request: request,
@@ -165,7 +165,7 @@ public final class CompanionLink {
         // Mac answering first.
         var refusal: Wire.Event?
         for endpoint in await bonjourEndpoints() {
-            let lan = TCPTransport(NWConnection(to: endpoint, using: .tcp))
+            let lan = TCPTransport(NWConnection(to: endpoint, using: .wire))
             transport = lan
             switch await exchange(
                 over: lan, channelKey: channelKey, request: request,

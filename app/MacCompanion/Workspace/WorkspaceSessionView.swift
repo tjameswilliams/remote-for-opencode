@@ -38,6 +38,34 @@ struct WorkspaceSessionView: View {
         return state.commands.matching(query)
     }
 
+    /// The cards that block a turn, split out of `body` because the
+    /// compiler gave up type-checking the whole thing in one expression.
+    @ViewBuilder
+    private var approvals: some View {
+        if let permission = turn.permission {
+            PermissionCard(request: permission, queued: turn.queuedPermissions) { answer in
+                turn.answer(permission, with: answer)
+            }
+            .frame(maxWidth: 640)
+            .padding(.vertical, 8)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+        if let question = turn.question {
+            QuestionCard(request: question) { answers in
+                turn.answer(question, answers: answers)
+            }
+            .frame(maxWidth: 640)
+            .padding(.vertical, 8)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
+    /// Leave a trailing space when the command wants arguments, so the
+    /// caret is where typing continues.
+    private func complete(_ command: AgentCommand) {
+        input = "/\(command.name)" + (command.takesArguments ? " " : "")
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Transcript(
@@ -50,30 +78,11 @@ struct WorkspaceSessionView: View {
             .frame(maxWidth: 640)
             .frame(maxWidth: .infinity)
 
-            if let permission = turn.permission {
-                PermissionCard(request: permission) { reply, message in
-                    turn.answer(permission, reply: reply, message: message)
-                }
-                .frame(maxWidth: 640)
-                .padding(.vertical, 8)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-            if let question = turn.question {
-                QuestionCard(request: question) { answers in
-                    turn.answer(question, answers: answers)
-                }
-                .frame(maxWidth: 640)
-                .padding(.vertical, 8)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
+            approvals
 
             if let matches = paletteMatches {
-                CommandPalette(commands: matches) { command in
-                    // Leave a trailing space when the command wants
-                    // arguments, so the caret is where typing continues.
-                    input = "/\(command.name)" + (command.takesArguments ? " " : "")
-                }
-                .frame(maxWidth: 640)
+                CommandPalette(commands: matches, pick: complete)
+                    .frame(maxWidth: 640)
             }
             DesktopComposer(
                 input: $input,
@@ -147,18 +156,38 @@ struct WorkspaceSessionView: View {
         .animation(.easeOut(duration: 0.15), value: paletteMatches?.count)
         .onReceive(NotificationCenter.default.publisher(for: WorkspaceCommand.approveOnce)) { _ in
             if let permission = turn.permission {
-                turn.answer(permission, reply: "once", message: nil)
+                turn.answer(permission, with: PermissionAnswer(reply: "once"))
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: WorkspaceCommand.reject)) { _ in
             if let permission = turn.permission {
-                turn.answer(permission, reply: "reject", message: nil)
+                turn.answer(permission, with: PermissionAnswer(reply: "reject"))
             }
         }
         .onChange(of: state.pendingCommand?.name) {
             guard let command = state.pendingCommand else { return }
             state.pendingCommand = nil
             input = "/\(command.name)" + (command.takesArguments ? " " : "")
+        }
+        .onChange(of: turn.session) {
+            // A conversation started from a project row now has a session:
+            // put it in the sidebar as the selected row, and start the
+            // watch the cold path skipped because there was nothing to
+            // watch yet.
+            guard let id = turn.session, case let .project(project) = state.selection else { return }
+            state.adopt(session: id, in: project)
+            turn.watch()
+        }
+        .onChange(of: turn.title) {
+            if let id = turn.session, let title = turn.title {
+                state.retitle(session: id, to: title)
+            }
+        }
+        .onChange(of: turn.running) {
+            // A finished turn moved this conversation to the top of its
+            // project on the Mac; the sidebar should agree without a ⌘R.
+            guard !turn.running, turn.session != nil else { return }
+            Task { await state.loadSessions() }
         }
         .task {
             // Watch first, then load: anything that lands between the two

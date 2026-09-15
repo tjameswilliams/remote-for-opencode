@@ -31,6 +31,35 @@ final class PromptAttachments: ObservableObject {
         var data: Data
         /// Rendered for the composer strip; nil for non-images.
         var thumbnail: PlatformImage?
+        /// A block of text pasted into the composer and lifted out of the
+        /// field. It travels as a text attachment (the Mac inlines it in
+        /// the prompt, fenced and named) and the strip draws it as a
+        /// "Pasted text" chip rather than a file.
+        var pasted = false
+
+        /// For the pasted-text chip.
+        var lineCount: Int {
+            PromptAttachments.lineCount(of: String(decoding: data, as: UTF8.self))
+        }
+    }
+
+    /// A paste this long goes into a chip instead of the field. The
+    /// vertical text field re-lays out its whole content on every
+    /// keystroke, and a few thousand characters of log output is enough to
+    /// make typing after it stutter; the same cutoffs the terminal agents
+    /// use, where the chip convention comes from.
+    static let pasteCharacterLimit = 800
+    static let pasteLineLimit = 10
+
+    nonisolated static func isLargePaste(_ text: String) -> Bool {
+        text.count > pasteCharacterLimit || lineCount(of: text) > pasteLineLimit
+    }
+
+    /// Every line ending Swift knows as one (CRLF included); a trailing
+    /// newline is not a line.
+    nonisolated static func lineCount(of text: String) -> Int {
+        let body = text.last?.isNewline == true ? text.dropLast() : text[...]
+        return body.isEmpty ? 0 : body.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
     }
 
     /// Matches the Mac's limit, checked here too so the failure lands
@@ -83,10 +112,37 @@ final class PromptAttachments: ObservableObject {
             add(imageData: data, name: url.lastPathComponent)
             return
         }
-        // Non-images ride as-is: text and PDFs are already compressed
-        // inside the seal (Wire.Squeeze), and re-encoding them would only
-        // lose fidelity the model may need.
-        append(Item(name: url.lastPathComponent, mime: mime, data: data, thumbnail: nil))
+        stage(name: url.lastPathComponent, mime: mime, data: data)
+    }
+
+    /// Text pasted into the composer, lifted out of the field. Numbered
+    /// from the second one on, so two pastes in one message stay apart in
+    /// the transcript's attachment line and in the prompt the model reads.
+    func add(pastedText text: String) {
+        let count = items.filter(\.pasted).count
+        let name = count == 0 ? "Pasted text.txt" : "Pasted text \(count + 1).txt"
+        stage(name: name, mime: "text/plain", data: Data(text.utf8), pasted: true)
+    }
+
+    /// Refuse here what the Mac would refuse anyway, so the failure lands
+    /// before an upload rather than after it, and never in the thread.
+    /// Text and PDFs then ride as-is: they are compressed inside the seal
+    /// (Wire.Squeeze), and re-encoding would only lose fidelity the model
+    /// may need.
+    private func stage(name: String, mime: String, data: Data, pasted: Bool = false) {
+        switch AttachmentDelivery.classify(mime: mime, name: name, bytes: data) {
+        case .unreadable:
+            error = "\(name) isn't something the model can read. Send text files, images, or PDFs."
+            return
+        case .tooLarge:
+            error = pasted
+                ? "That paste is too large to send (limit \(AttachmentDelivery.textLimit >> 10) KB)."
+                : "\(name) is too large to send as text (limit \(AttachmentDelivery.textLimit >> 10) KB)."
+            return
+        case .image, .pdf, .text:
+            break
+        }
+        append(Item(name: name, mime: mime, data: data, thumbnail: nil, pasted: pasted))
     }
 
     #if os(iOS)
@@ -152,6 +208,23 @@ struct AttachmentStrip: View {
                                     .resizable()
                                     .scaledToFill()
                                 #endif
+                            } else if item.pasted {
+                                // Line count rather than a file name: what
+                                // was pasted has no name, and how much of
+                                // it there is says what the chip holds.
+                                VStack(spacing: 2) {
+                                    Image(systemName: "text.alignleft")
+                                        .font(.title3)
+                                    Text("Pasted text")
+                                        .font(.system(size: 9))
+                                        .lineLimit(1)
+                                    Text("\(item.lineCount) lines")
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .background(Color.primary.opacity(0.06))
                             } else {
                                 VStack(spacing: 2) {
                                     Image(systemName: "doc")
@@ -178,7 +251,7 @@ struct AttachmentStrip: View {
                         }
                         .buttonStyle(.plain)
                         .offset(x: 5, y: -5)
-                        .accessibilityLabel("Remove \(item.name)")
+                        .accessibilityLabel(item.pasted ? "Remove pasted text" : "Remove \(item.name)")
                     }
                 }
             }

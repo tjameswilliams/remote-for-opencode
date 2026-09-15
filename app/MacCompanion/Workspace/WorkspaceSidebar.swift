@@ -7,6 +7,16 @@ import UniformTypeIdentifiers
 /// list style already agrees with the design language.
 struct WorkspaceSidebar: View {
     @ObservedObject var state: WorkspaceState
+    /// The list's own selection, forwarded to the store from `onChange`.
+    /// Bound to the store directly, the outline view writes it from
+    /// inside SwiftUI's update pass, and a published property written
+    /// there is undefined behavior (SwiftUI says so in the log); on one
+    /// Mac it surfaced as an AppKit layout loop that took the window
+    /// down a few seconds after every click on a conversation.
+    @State private var selected: WorkspaceSelection?
+    /// Same arrangement for the search field, which AppKit's field editor
+    /// writes on every keystroke and on focus changes.
+    @State private var query = ""
     @State private var renaming: Session?
     @State private var newTitle = ""
     /// Disclosure the user has set by hand, by project id. Anything absent
@@ -19,7 +29,7 @@ struct WorkspaceSidebar: View {
     @State private var typedFolderPath = ""
 
     var body: some View {
-        List(selection: $state.selection) {
+        List(selection: $selected) {
             scheduledSection
             macSection
             if let error = state.error {
@@ -34,6 +44,26 @@ struct WorkspaceSidebar: View {
         .listStyle(.sidebar)
         .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
         .safeAreaInset(edge: .top, spacing: 0) { searchField }
+        // Two-way sync with the store, each direction guarded so the
+        // echo of its own write is a no-op rather than a second publish.
+        .onAppear {
+            selected = state.selection
+            query = state.search
+        }
+        .onChange(of: selected) {
+            if state.selection != selected { state.selection = selected }
+        }
+        .onChange(of: state.selection) {
+            if selected != state.selection { selected = state.selection }
+        }
+        .onChange(of: query) {
+            guard state.search != query else { return }
+            state.search = query
+            state.searchChanged()
+        }
+        .onChange(of: state.search) {
+            if query != state.search { query = state.search }
+        }
         .alert("Rename session", isPresented: Binding(
             get: { renaming != nil },
             set: { if !$0 { renaming = nil } }
@@ -144,10 +174,9 @@ struct WorkspaceSidebar: View {
 
     private var searchField: some View {
         HStack(spacing: 6) {
-            TextField("Search projects and sessions", text: $state.search)
+            TextField("Search projects and sessions", text: $query)
                 .textFieldStyle(.roundedBorder)
                 .controlSize(.small)
-                .onChange(of: state.search) { state.searchChanged() }
             // The lists load once per window otherwise, and a session
             // started in a terminal has no way to announce itself.
             Button {

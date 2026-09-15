@@ -59,8 +59,26 @@ have already observed.
     the approval flow per-session — the phone's "always ask me" toggle.
 - `POST /session/{id}/prompt_async?directory=…` body
   `{model: {providerID, modelID}, parts: [{type: "text", text}]}` → 200 immediately.
+- Attachments: `parts` may carry `{type: "file", mime, filename, url:
+  "data:<mime>;base64,…"}`, but OpenCode hands file parts to the provider
+  untouched, and the AI SDK adapter under a local vllm accepts only images
+  and PDFs. Any other media type fails the turn ("'file part media type
+  application/json' functionality not supported") and, since the part is
+  now in the history, every turn after it (seen 2026-09-09). The companion
+  therefore inlines text-like attachments as text parts (`AttachmentDelivery`)
+  and refuses the rest; the phone refuses them at the picker.
 - Stream: `GET /event?directory=…` (SSE). One subscription per instance;
   `/global/event` exists for all-instance coverage.
+- The first event of a prompt turn is `{kind: "status", session}`: the id
+  of the session the turn landed in, sent before anything streams, so a
+  client that prompted without a session can continue the thread later.
+- Titles: OpenCode creates a session as "New session - <ISO date>" and
+  names it from the first exchange, some seconds in. Each
+  `session.created`/`session.updated` whose `info.title` differs from the
+  last one relayed becomes `{kind: "status", session, title}` (prompt and
+  watch alike), so a sidebar that opened the thread fresh learns its name
+  without a list refresh. Absent `title` means the record changed in some
+  other field; a client ignores the event.
 - Abort: `POST /session/{id}/abort`.
 
 ### `permission`
@@ -74,6 +92,32 @@ have already observed.
 - Reply: `POST /permission/{requestID}/reply` body
   `{reply: "once" | "always" | "reject", message?}`. The blocked tool call
   (state `running`) proceeds immediately on approval.
+- "always" is exact and session-only: it whitelists the `always` patterns
+  OpenCode proposed (the parent folder, the command) until the server
+  restarts; nothing is saved (verified 1.18.15: the saved-permissions table
+  stays empty). Wider grants are the client's job, and OpenCode gives two
+  ways to make them:
+  - `PATCH /session/{id}` with `permission: [{permission, pattern, action}]`
+    replaces the session's ruleset. Immediate, session-scoped, shared with
+    the MCP switches, so edit only your own rules.
+  - `permission.<kind>` in `.opencode/opencode.json` (project) or the global
+    config, object form `{"<pattern>": "allow"}`; `*` matches anything
+    including slashes, `?` one character. Read at startup only.
+  The v1 `permission` reply may carry `grant: {permission, patterns,
+  persist}`: the Mac fills the ask's `scopes` (this folder, whole project
+  by git root, this command, every `<word>` command) so the card can
+  offer them; a grant is applied to the session ruleset before the reply,
+  written to the project config when `persist` is set, and every other
+  pending ask it covers is answered in the same breath.
+- Asks queue. A model that reads four files outside the project in one
+  step raises four `permission.asked` events two seconds apart, and each
+  reply releases exactly one tool call; the others stay pending (and the
+  session stays busy) until each is answered. The companion therefore
+  sends the v1 `permission` event as the queue: `permission` is the oldest
+  ask, `permissions` is every ask still pending for the session, and a
+  reply (from anywhere) re-sends the event with the next one at the front.
+  A companion turn's stall watchdog is held while anything is pending, so
+  a person reading a diff is never reported as a model that stopped.
 - Questions are the same shape: `question.asked`, `GET /question`,
   `POST /question/{requestID}/reply` | `/reject`.
 
@@ -182,6 +226,8 @@ request. Its rows are already `FileDiff`-shaped
     payload): the ask was answered elsewhere, take the card down.
   - Failures never end the watch: a `session.error` is relayed as
     `failed` without `done` and the watch continues.
+  - Renames arrive as `{kind: "status", session, title}`, exactly as on
+    a prompt turn.
 - Lifetime: one connection per watch; the client ends it by closing the
   transport, which cancels the Mac-side task. The Mac resubscribes to the
   SSE feed if it drops (OpenCode restart) for as long as the connection
@@ -397,3 +443,11 @@ Adapter rule: subscribe to both old and new event names; detect once via
 - The model for a prompt comes from the phone's pick of
   `GET /config/providers`; there is no server-side "default model for this
   project" the adapter can rely on across versions.
+- `GET /event` is one long-lived connection per subscriber, and URLSession
+  counts it against its default cap of 6 connections per host. Never open
+  the feed on the same session as one-shot requests: once six streams are
+  held (a phone reconnecting over a half-open LAN socket leaves its watch,
+  and its stream, alive) every other call queues behind them, including the
+  health check that gates the handshake's `ready`. The companion shares one
+  feed per instance through `EventStreamHub` and keeps requests on a
+  separate session with a real timeout; keep it that way.

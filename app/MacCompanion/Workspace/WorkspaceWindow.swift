@@ -153,24 +153,8 @@ struct WorkspaceWindow: View {
     @ViewBuilder
     private var detail: some View {
         switch state.selection {
-        case let .session(session):
-            WorkspaceSessionView(
-                state: state,
-                project: session.directory ?? "",
-                session: session.id,
-                title: session.title ?? "Session"
-            )
-            // A fresh controller per conversation: the id is what stops one
-            // session's in-flight turn from streaming into another's pane.
-            .id(session.id)
-        case let .project(project):
-            WorkspaceSessionView(
-                state: state,
-                project: project.worktree,
-                session: nil,
-                title: project.displayName
-            )
-            .id(project.worktree)
+        case .session, .project:
+            conversation
         case .schedules:
             ScheduleListView(
                 store: state.schedules, models: state.models, projects: state.projects
@@ -188,6 +172,36 @@ struct WorkspaceWindow: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.canvas)
+        }
+    }
+
+    /// One structural position for both an existing session and a fresh
+    /// project pane. Built as two `switch` cases they would be two views
+    /// to SwiftUI, and a project pane turning into a session pane (the
+    /// adoption in WorkspaceState) would be rebuilt, controller and
+    /// in-flight turn included, whatever its key said.
+    @ViewBuilder
+    private var conversation: some View {
+        let target: (project: String, session: String?, title: String)? = switch state.selection {
+        case let .session(session):
+            (session.directory ?? "", session.id, session.title ?? "Session")
+        case let .project(project):
+            (project.worktree, nil, project.displayName)
+        default:
+            nil
+        }
+        if let target {
+            WorkspaceSessionView(
+                state: state,
+                project: target.project,
+                session: target.session,
+                title: target.title
+            )
+            // A fresh controller per conversation: the key is what stops
+            // one session's in-flight turn from streaming into another's
+            // pane. The state owns it so a fresh conversation can keep its
+            // pane when it becomes a session (WorkspaceState.adopt).
+            .id(state.paneKey)
         }
     }
 }

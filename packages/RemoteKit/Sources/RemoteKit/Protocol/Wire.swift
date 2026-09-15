@@ -72,6 +72,10 @@ public enum Wire {
         public var permissionID: String?
         /// permission: "once" | "always" | "reject".
         public var reply: String?
+        /// permission: the wider whitelist riding on an approving reply.
+        /// The Mac applies it before answering, so the rule is in place
+        /// for the very next tool call.
+        public var grant: PermissionGrant?
         /// permission: what to do instead, on a reject. A denial that can
         /// carry direction is steering rather than a dead end.
         public var message: String?
@@ -186,6 +190,12 @@ public enum Wire {
         /// On `status` and `part`: which OpenCode session this concerns —
         /// also how a `prompt` learns the id of the session it created.
         public var session: String?
+        /// On `status`, during a prompt or a watch: the session's title,
+        /// sent each time OpenCode names or renames it. A fresh session is
+        /// created with a placeholder and named after its first answer; a
+        /// sidebar that showed the placeholder would otherwise keep it
+        /// until the next list refresh.
+        public var title: String?
         /// On `failed`: transient, worth retrying without asking the user.
         public var transient: Bool?
         /// On `schedules`: the Mac's complete scheduled task list.

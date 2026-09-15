@@ -27,6 +27,26 @@ public protocol WireTransport: AnyObject {
 
 extension PunchTransport: WireTransport {}
 
+public extension NWParameters {
+    /// TCP for the `Wire` protocol, with keepalive probes on.
+    ///
+    /// A phone that iOS suspends, or that walks out of Wi-Fi range, sends
+    /// no FIN. Without probes the Mac's side of that connection stays
+    /// `ready` forever: nothing is ever sent on an idle watch, so TCP never
+    /// finds out, and the connection's owner (and everything it holds: a
+    /// watch task, an event stream to OpenCode) lives on with it. Probes
+    /// turn that silence into a failure in about half a minute, which the
+    /// transport reports like any other close.
+    static var wire: NWParameters {
+        let tcp = NWProtocolTCP.Options()
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 15
+        tcp.keepaliveInterval = 5
+        tcp.keepaliveCount = 3
+        return NWParameters(tls: nil, tcp: tcp)
+    }
+}
+
 /// The LAN transport: `Wire` over a TCP `NWConnection`.
 public final class TCPTransport: WireTransport {
     public var onBytes: ((Data) -> Void)?
@@ -36,6 +56,7 @@ public final class TCPTransport: WireTransport {
 
     private let connection: NWConnection
     private var finished = false
+    private var wasReady = false
 
     public init(_ connection: NWConnection) {
         self.connection = connection
@@ -43,11 +64,23 @@ public final class TCPTransport: WireTransport {
 
     public func start() {
         connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
             switch state {
+            case .ready:
+                wasReady = true
+            case let .waiting(error):
+                // Before `ready`, waiting is the normal "no path yet". After
+                // it, the path under an established connection went away.
+                // There is no reconnect logic above this line, so nothing
+                // would ever arrive on it again: treat it as the close it
+                // is, rather than hold a dead peer open.
+                guard wasReady else { return }
+                connection.cancel()
+                finish(error.localizedDescription)
             case let .failed(error):
-                self?.finish(error.localizedDescription)
+                finish(error.localizedDescription)
             case .cancelled:
-                self?.finish(nil)
+                finish(nil)
             default:
                 break
             }

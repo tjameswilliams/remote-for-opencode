@@ -143,13 +143,35 @@ final class OpenCodeProcess: ObservableObject {
         p.standardError = out
         var buffer = ""
         out.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            guard let text = String(data: handle.availableData, encoding: .utf8), !text.isEmpty
-            else { return }
+            let data = handle.availableData
+            // Empty means EOF: the child is gone. Drop the handler, or it
+            // fires again immediately, forever.
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            guard let text = String(data: data, encoding: .utf8) else { return }
             buffer += text
             // "opencode server listening on http://127.0.0.1:PORT"
             if let range = buffer.range(of: #"listening on http://127\.0\.0\.1:(\d+)"#, options: .regularExpression) {
                 let port = Int(buffer[range].split(separator: ":").last ?? "") ?? 0
-                out.fileHandleForReading.readabilityHandler = nil
+                buffer = ""
+                // Keep reading for the life of the child. A pipe nobody
+                // drains fills at 64 KB, and a process blocked on a write
+                // to it (a stack trace, say) hangs rather than crashes,
+                // which is the worst way for OpenCode to fail. What it
+                // prints is worth the log anyway.
+                handle.readabilityHandler = { [weak self] handle in
+                    let data = handle.availableData
+                    guard !data.isEmpty else {
+                        handle.readabilityHandler = nil
+                        return
+                    }
+                    guard let text = String(data: data, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
+                    else { return }
+                    self?.logger.debug("opencode: \(text, privacy: .public)")
+                }
                 Task { @MainActor [weak self] in self?.confirm(port: port) }
             }
         }
