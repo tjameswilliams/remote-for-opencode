@@ -48,8 +48,8 @@ final class PromptAttachments: ObservableObject {
     /// keystroke, and a few thousand characters of log output is enough to
     /// make typing after it stutter; the same cutoffs the terminal agents
     /// use, where the chip convention comes from.
-    static let pasteCharacterLimit = 800
-    static let pasteLineLimit = 10
+    nonisolated static let pasteCharacterLimit = 800
+    nonisolated static let pasteLineLimit = 10
 
     nonisolated static func isLargePaste(_ text: String) -> Bool {
         text.count > pasteCharacterLimit || lineCount(of: text) > pasteLineLimit
