@@ -150,7 +150,7 @@ struct McpMenu: View {
                 } label: {
                     // A configured-but-unreachable server would do nothing
                     // switched on; say so where the switch is.
-                    let name = server.connected ? server.name : "\(server.name) (offline)"
+                    let name = server.connected ? server.displayName : "\(server.displayName) (offline)"
                     if server.enabled {
                         Label(name, systemImage: "checkmark")
                     } else {

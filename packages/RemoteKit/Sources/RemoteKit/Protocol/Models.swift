@@ -16,16 +16,21 @@ public struct Capabilities: Codable, Equatable, Sendable {
     public var diffs: Bool?
     /// This Mac understands the schedule.* request kinds.
     public var schedules: Bool?
+    /// This Mac understands the mcp.* request kinds: the global MCP server
+    /// list, edits to it, and per-server defaults.
+    public var mcpManagement: Bool?
 
     public init(
         opencodeVersion: String? = nil, permissions: Bool? = nil,
-        questions: Bool? = nil, diffs: Bool? = nil, schedules: Bool? = nil
+        questions: Bool? = nil, diffs: Bool? = nil, schedules: Bool? = nil,
+        mcpManagement: Bool? = nil
     ) {
         self.opencodeVersion = opencodeVersion
         self.permissions = permissions
         self.questions = questions
         self.diffs = diffs
         self.schedules = schedules
+        self.mcpManagement = mcpManagement
     }
 }
 
@@ -46,10 +51,17 @@ public struct Project: Codable, Hashable, Identifiable, Sendable {
     /// OpenCode's history and discovered repos would reappear on the next
     /// disk walk.
     public var added: Bool?
+    /// True for the Mac's chat folder: a scratch directory the companion
+    /// owns, where conversations that belong to no project live. OpenCode
+    /// has no notion of a session without a directory, so this is how the
+    /// clients offer "just chat" the way a terminal in a non-repo folder
+    /// would. Clients pin it first and never offer to remove it.
+    public var scratch: Bool?
 
     public init(
         id: String, worktree: String, name: String? = nil,
-        updated: Date? = nil, known: Bool? = nil, added: Bool? = nil
+        updated: Date? = nil, known: Bool? = nil, added: Bool? = nil,
+        scratch: Bool? = nil
     ) {
         self.id = id
         self.worktree = worktree
@@ -57,6 +69,7 @@ public struct Project: Codable, Hashable, Identifiable, Sendable {
         self.updated = updated
         self.known = known
         self.added = added
+        self.scratch = scratch
     }
 
     public var displayName: String {
@@ -305,16 +318,60 @@ public struct McpServer: Codable, Hashable, Identifiable, Sendable {
     /// showing: a switched-on server that failed to start explains why its
     /// tools aren't doing anything.
     public var status: String?
-    /// Whether this conversation's session exposes the server's tools.
+    /// Whether this conversation's session exposes the server's tools. On
+    /// a list with no session, this is what a fresh conversation would
+    /// start with: the default.
     public var enabled: Bool
+    /// Whether a fresh conversation starts with this server's tools on.
+    /// Set globally on the Mac (the MCP Servers page, or the management
+    /// tools); a conversation's own switch overrides it.
+    public var defaultEnabled: Bool?
+    /// "local" | "remote", when the global config defines the server.
+    public var type: String?
+    /// The command or the URL, for the list row.
+    public var summary: String?
+    /// True when the server is defined in the Mac's global opencode.json,
+    /// which is the only place the clients can edit or remove it. A server
+    /// from a project's own config shows up with its status but is the
+    /// project's business.
+    public var configured: Bool?
+    /// True for the companion's own tool server (the management tools the
+    /// global chat uses). Not editable, not removable, and its default is
+    /// fixed: on in the chat folder, off everywhere else.
+    public var builtin: Bool?
+    /// Why a `failed` server failed, from OpenCode.
+    public var error: String?
+    /// The full definition from the global config, for the editor; only
+    /// sent for configured servers.
+    public var config: McpServerConfig?
 
     public var id: String { name }
 
-    public init(name: String, status: String? = nil, enabled: Bool = true) {
+    public init(
+        name: String, status: String? = nil, enabled: Bool = true,
+        defaultEnabled: Bool? = nil, type: String? = nil, summary: String? = nil,
+        configured: Bool? = nil, builtin: Bool? = nil, error: String? = nil,
+        config: McpServerConfig? = nil
+    ) {
         self.name = name
         self.status = status
         self.enabled = enabled
+        self.defaultEnabled = defaultEnabled
+        self.type = type
+        self.summary = summary
+        self.configured = configured
+        self.builtin = builtin
+        self.error = error
+        self.config = config
     }
+
+    /// What a switch or a row calls the server. The companion's own tool
+    /// server is named for what it is rather than by its config key.
+    public var displayName: String {
+        builtin == true ? "Remote for OpenCode tools" : name
+    }
+
+    public var isDefaultEnabled: Bool { defaultEnabled ?? true }
 
     /// False when the server is configured but not answering; its tools
     /// wouldn't work even switched on.

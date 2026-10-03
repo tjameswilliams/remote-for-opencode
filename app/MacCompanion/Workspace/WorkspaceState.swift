@@ -12,6 +12,8 @@ enum WorkspaceSelection: Hashable {
     /// The model sources screen: the endpoints this Mac keeps OpenCode's
     /// model list in step with. This Mac only; it edits a local file.
     case modelSources
+    /// The MCP servers screen: the active Mac's roster and defaults.
+    case mcpServers
 }
 
 /// One workspace window's world: the peer it is talking to (v1: always
@@ -53,6 +55,7 @@ final class WorkspaceState: ObservableObject {
         agents = AgentStore(makeLink: makeLink)
         commands = CommandStore(makeLink: makeLink)
         schedules = ScheduleStore(makeLink: makeLink)
+        mcpServers = McpRegistryStore(makeLink: makeLink)
         selection = nil
         sessions = []
         projects = []
@@ -67,6 +70,12 @@ final class WorkspaceState: ObservableObject {
     }
 
     @Published var projects: [Project] = []
+    /// The active Mac's chat folder, for conversations outside any
+    /// project. Nil until the project list arrives, or forever against a
+    /// companion too old to send one.
+    var chatProject: Project? {
+        projects.first { $0.scratch == true }
+    }
     /// The sidebar's sessions. The selection holds a whole `Session` (the
     /// row tags do too), so a refreshed list with a new title or timestamp
     /// would silently stop matching the selected row and the highlight
@@ -160,6 +169,7 @@ final class WorkspaceState: ObservableObject {
     private(set) var agents: AgentStore
     private(set) var commands: CommandStore
     private(set) var schedules: ScheduleStore
+    private(set) var mcpServers: McpRegistryStore
 
     private var searchTask: Task<Void, Never>?
 
@@ -170,6 +180,7 @@ final class WorkspaceState: ObservableObject {
         agents = AgentStore(makeLink: link)
         commands = CommandStore(makeLink: link)
         schedules = ScheduleStore(makeLink: link)
+        mcpServers = McpRegistryStore(makeLink: link)
     }
 
     func load() async {

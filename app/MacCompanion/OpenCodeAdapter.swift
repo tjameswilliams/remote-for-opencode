@@ -161,7 +161,7 @@ struct OpenCodeAdapter {
         // one of these.
         return Capabilities(
             opencodeVersion: health.version, permissions: true, questions: true, diffs: true,
-            schedules: true
+            schedules: true, mcpManagement: true
         )
     }
 
@@ -416,63 +416,57 @@ struct OpenCodeAdapter {
 
     // MARK: - v1: MCP servers
 
-    /// OpenCode names an MCP tool `<server>_<tool>`, squashing anything
-    /// outside [a-zA-Z0-9_-] in either half to "_" (their
-    /// McpCatalog.sanitize). Rules that hide a server's tools must match
-    /// that spelling, not the raw config key.
-    static func sanitizedMcp(_ name: String) -> String {
-        String(name.unicodeScalars.map { scalar -> Character in
-            switch scalar {
-            case "a" ... "z", "A" ... "Z", "0" ... "9", "-", "_": return Character(scalar)
-            default: return "_"
-            }
-        })
+    /// Every server the instance for `directory` knows (the merged config
+    /// at its startup, plus anything added live), with OpenCode's status
+    /// word and, for a failure, why.
+    func mcpStatus(directory: String) async throws -> [String: (status: String, error: String?)] {
+        let status = try await get("/mcp", directory: directory) as? [String: Any] ?? [:]
+        var result: [String: (status: String, error: String?)] = [:]
+        for (name, value) in status {
+            let entry = value as? [String: Any]
+            result[name] = (entry?["status"] as? String ?? "unknown", entry?["error"] as? String)
+        }
+        return result
     }
 
-    /// The MCP servers this OpenCode configures, and, when a session is
-    /// named, whether that session exposes each one's tools.
-    ///
-    /// Enablement is read from the session's own permission rules, because
-    /// that is where `setMcp` puts it: the session is the durable truth,
-    /// so every client shows the same switches and a fresh conversation
-    /// starts with everything on.
-    func mcpServers(directory: String, sessionID: String?) async throws -> [McpServer] {
-        let status = try await get("/mcp", directory: directory) as? [String: Any] ?? [:]
-        var denied = Set<String>()
-        if let sessionID {
-            let session = try await get(
-                "/session/\(sessionID)", directory: directory
-            ) as? [String: Any] ?? [:]
-            let rules = session["permission"] as? [[String: Any]] ?? []
-            for rule in rules
-                where rule["action"] as? String == "deny" && rule["pattern"] as? String == "*" {
-                if let permission = rule["permission"] as? String, permission.hasSuffix("_*") {
-                    denied.insert(String(permission.dropLast(2)))
-                }
-            }
+    /// The session's own word on each server, by sanitized name: true
+    /// under an allow rule, false under a deny rule, absent when the
+    /// session has no rule and the config decides. A later rule for the
+    /// same server wins, which is how OpenCode evaluates them.
+    func mcpRules(sessionID: String, directory: String) async throws -> [String: Bool] {
+        let session = try await get("/session/\(sessionID)", directory: directory)
+            as? [String: Any] ?? [:]
+        var result: [String: Bool] = [:]
+        for rule in session["permission"] as? [[String: Any]] ?? [] where Self.isMcpRule(rule) {
+            guard let permission = rule["permission"] as? String else { continue }
+            result[String(permission.dropLast(2))] = rule["action"] as? String == "allow"
         }
-        return status.map { name, value in
-            McpServer(
-                name: name,
-                status: (value as? [String: Any])?["status"] as? String,
-                enabled: !denied.contains(Self.sanitizedMcp(name))
-            )
-        }
-        .sorted { $0.name < $1.name }
+        return result
     }
 
     /// Make the session's tool exposure exactly `servers`: one wildcard
-    /// deny rule per switched-off server, nothing for the rest. A denied
-    /// server's tools aren't merely blocked: OpenCode drops them from
-    /// what the model sees, which is the decluttering the toggle promises
-    /// (verified live against 1.18.15).
+    /// deny rule per switched-off server, an allow rule for a switched-on
+    /// server the config denies (the companion's own tool server), and
+    /// nothing for the rest. A denied server's tools aren't merely
+    /// blocked: OpenCode drops them from what the model sees, which is
+    /// the decluttering the toggle promises (verified live against
+    /// 1.18.15). Session rules are evaluated after the config's, so the
+    /// allow rule re-exposes what the config hid.
     ///
     /// PATCH replaces the session's whole ruleset. That is the intended
     /// semantics (the map is the complete truth), and it mirrors what
     /// OpenCode itself does when a prompt carries a `tools` map.
-    func setMcp(sessionID: String, directory: String, servers: [String: Bool]) async throws {
-        let rules = servers.filter { !$0.value }.keys.sorted().map { name in
-            ["permission": Self.sanitizedMcp(name) + "_*", "pattern": "*", "action": "deny"]
+    func setMcp(
+        sessionID: String, directory: String, servers: [String: Bool], configDenied: Set<String>
+    ) async throws {
+        var rules: [[String: Any]] = []
+        for name in servers.keys.sorted() {
+            let sanitized = McpConfigEdit.sanitized(name)
+            if servers[name] == false {
+                rules.append(["permission": sanitized + "_*", "pattern": "*", "action": "deny"])
+            } else if configDenied.contains(sanitized) {
+                rules.append(["permission": sanitized + "_*", "pattern": "*", "action": "allow"])
+            }
         }
         try await updateRules(sessionID: sessionID, directory: directory) { existing in
             // Only the MCP switches are this call's to rewrite; a grant
@@ -481,10 +475,33 @@ struct OpenCodeAdapter {
         }
     }
 
+    /// A rule that switches a whole server on or off. A permission grant
+    /// names a tool ("bash", "edit"), never a `<server>_*` prefix.
     private static func isMcpRule(_ rule: [String: Any]) -> Bool {
-        (rule["permission"] as? String)?.hasSuffix("_*") == true
-            && rule["pattern"] as? String == "*"
-            && rule["action"] as? String == "deny"
+        guard (rule["permission"] as? String)?.hasSuffix("_*") == true,
+              rule["pattern"] as? String == "*",
+              let action = rule["action"] as? String
+        else { return false }
+        return action == "deny" || action == "allow"
+    }
+
+    /// Add or replace a server in the running instance for `directory`
+    /// and connect it (`POST /mcp`, verified on 1.18.15). In-memory only:
+    /// the file is the companion's to write, and other instances see the
+    /// server at the next restart.
+    func addMcp(_ server: McpServerConfig, directory: String) async throws -> (status: String, error: String?) {
+        let json = try await post(
+            "/mcp", directory: directory, body: ["name": server.name, "config": server.block()],
+            timeout: Self.requestTimeout * 2
+        ) as? [String: Any] ?? [:]
+        let entry = json[server.name] as? [String: Any]
+        return (entry?["status"] as? String ?? "unknown", entry?["error"] as? String)
+    }
+
+    /// Close a server's client in the instance for `directory`; its
+    /// tools leave the model's list at the next step.
+    func disconnectMcp(_ name: String, directory: String) async throws {
+        try await post("/mcp/\(name)/disconnect", directory: directory)
     }
 
     /// Read-modify-write of the session's ruleset. PATCH replaces the

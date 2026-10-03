@@ -12,6 +12,10 @@ struct MacCompanionApp: App {
     @StateObject private var server: RemoteServer
     @StateObject private var scheduler: Scheduler
     @StateObject private var modelSources = ModelSourceStore.shared
+    /// The companion's own MCP server, for the global chat's management
+    /// tools. Started before OpenCode so the first connection attempt
+    /// finds it listening.
+    private let tools = ToolServer(registry: McpRegistry.shared)
     @State private var started = false
     /// Sparkle drives its own update checks against the appcast; this also
     /// backs the menu's manual "Check for Updates…". The app is distributed
@@ -63,6 +67,7 @@ struct MacCompanionApp: App {
         // serve`, held back while a turn is mid-flight.
         ModelSourceStore.shared.restartOpenCode = { [weak opencode] in opencode?.restart() }
         ModelSourceStore.shared.activeTurns = { LiveTurns.shared.activeCount }
+        McpRegistry.shared.adapter = adapter
     }
 
     var body: some Scene {
@@ -98,6 +103,10 @@ struct MacCompanionApp: App {
         guard !started else { return }
         started = true
         if Self.updatesConfigured { updater.startUpdater() }
+        // The tool server's config entry must be in the file before
+        // OpenCode reads it, and the listener up before OpenCode connects.
+        McpRegistry.shared.registerToolServer()
+        tools.start()
         opencode.start()
         server.start()
         scheduler.start()

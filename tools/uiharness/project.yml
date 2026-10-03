@@ -43,6 +43,8 @@ targets:
       - path: ../../app/Shared/McpStore.swift
       - path: ../../app/Shared/ScheduleStore.swift
       - path: ../../app/Shared/ScheduleViews.swift
+      - path: ../../app/Shared/McpRegistryStore.swift
+      - path: ../../app/Shared/McpViews.swift
     info:
       path: Harness/Info.plist
       properties:

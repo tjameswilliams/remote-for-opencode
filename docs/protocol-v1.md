@@ -34,6 +34,21 @@ have already observed.
   - Includes a synthetic `id: "global"` entry (worktree `/`) — filter it out.
   - Only projects previously opened with OpenCode; Mac-side git discovery
     supplements this for never-opened repos.
+- The event leads with the Mac's chat folder: `{id: "chats", worktree:
+  "~/Library/Application Support/Remote for OpenCode/Chats", name: "Chats",
+  known: true, scratch: true}`. OpenCode has no session without a working
+  directory; every directory outside a git repo resolves to its `global`
+  project (verified on 1.18.15: `GET /project/current?directory=<any
+  non-repo folder>` answers `global`), which is what the CLI does when run
+  from a scratch folder. The companion owns this folder so the agent's
+  listing, grep, and any file it writes land somewhere harmless. Clients
+  pin a `scratch` project first, never offer to remove it, and start
+  "New Chat" sessions in it through the ordinary `prompt` path (`project`
+  set to its worktree, no `session`). Sessions in it come back from
+  `sessions` with `directory` equal to the worktree, so the usual
+  directory join groups them. `/vcs` there answers `{branch: null,
+  default_branch: null}` and `/vcs/diff` `[]`; the changes pane simply
+  reads as clean.
 
 ### `project.add` / `project.remove`
 - `{kind: "project.add", project: "<path>"}` pins a folder as a project
@@ -206,6 +221,41 @@ request. Its rows are already `FileDiff`-shaped
   client that never opened the menu can't erase rules another one set.
   All verified live against 1.18.15, including that the model's visible
   tool list shrinks (48 → 14 with four servers denied).
+- Since 2026-09-22 the list carries `defaultEnabled`, `type`, `summary`,
+  `configured`, `builtin`, `error`, and `config` per server, and a request
+  with no session answers `enabled` as the default (what a fresh
+  conversation would start with) rather than "everything on". A fresh
+  session gets the Mac's defaults written as rules right after
+  `POST /session`, before the prompt's own map (if any) replaces them;
+  scheduled runs get them too. A switched-on server the config denies
+  (`permission: {"<server>_*": "deny"}`, how the companion hides its own
+  tool server) gets an allow rule instead of nothing, because session
+  rules are evaluated last. Reading back: a session's allow rule means on,
+  a deny rule means off, no rule means whatever the config says.
+
+### `mcp.*`: the global MCP server list and defaults
+- Every kind answers with one `{kind: "mcp", mcp: [McpServer],
+  restartNeeded?, configPath}` listing every server plus `done`:
+  - `{kind: "mcp.list", project?}`: the roster from the Mac's global
+    opencode.json joined with `GET /mcp?directory=…` status. `project`
+    picks the instance asked for status; absent means the chat folder.
+  - `{kind: "mcp.save", server: McpServerConfig, project?}`: add or
+    replace in the file (matched by name), then `POST /mcp {name, config}`
+    on that instance to connect it live. Validation on the Mac (name,
+    command for local, http(s) URL for remote, positive timeout); a
+    rejected save is a readable `failed`.
+  - `{kind: "mcp.remove", name, project?}`: drop from the file and
+    `POST /mcp/{name}/disconnect`. Servers not in the global file (a
+    project's own, the companion's) are refused.
+  - `{kind: "mcp.defaults", mcp: {name: bool}}`: set the named servers'
+    defaults; unnamed ones keep theirs. Companion-side, no OpenCode call.
+  - `{kind: "mcp.restart"}`: restart the Mac's `opencode serve` so every
+    instance reads the edited file. Answers an empty list; clients
+    re-list a few seconds later.
+- `capabilities.mcpManagement` on `ready`/`status` is the feature gate.
+- The companion's own MCP server (`remote`, loopback `127.0.0.1:8767/mcp`,
+  bearer token) offers these operations as tools for the global chat. See
+  docs/mcp-servers.md for what was verified live against 1.18.15.
 
 ### `watch` — live view of a session this client didn't prompt
 - `{kind: "watch", session, project}` subscribes to the session's live

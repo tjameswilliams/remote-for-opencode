@@ -21,6 +21,7 @@ struct HarnessView: View {
     @StateObject private var agents = AgentStore.shared
     @StateObject private var mcp = McpStore(project: "/tmp/harness", session: nil)
     @StateObject private var schedules = ScheduleStore()
+    @StateObject private var mcpServers = McpRegistryStore()
     @StateObject private var attachments = PromptAttachments()
     @StateObject private var dictation = Dictation()
     @State private var input = ""
@@ -46,6 +47,7 @@ struct HarnessView: View {
             agents.mockForHarness(plan: scene == 4)
             mcp.mockForHarness()
             schedules.mockForHarness()
+            mcpServers.mockForHarness()
         }
     }
 
@@ -56,6 +58,7 @@ struct HarnessView: View {
         case 3: patch
         case 4: planning
         case 5: scheduled
+        case 6: mcpServersScene
         default: working
         }
     }
@@ -93,6 +96,10 @@ struct HarnessView: View {
         ) { _ in }
     }
 
+    private var mcpServersScene: some View {
+        McpServersView(store: mcpServers)
+    }
+
     private var permission: some View {
         ZStack {
             working
@@ -103,7 +110,7 @@ struct HarnessView: View {
                     id: "p", permission: "bash",
                     patterns: ["rm -rf ./build && npm publish --access public"],
                     always: ["rm *"], risk: "high"
-                )) { _, _ in }
+                )) { _ in }
                 .frame(height: 540)
                 .background(Color.canvas)
                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))

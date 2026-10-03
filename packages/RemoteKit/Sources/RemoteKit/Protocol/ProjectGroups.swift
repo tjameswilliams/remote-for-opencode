@@ -24,7 +24,7 @@ public struct ProjectGroup: Hashable, Identifiable, Sendable {
 
     /// When something last happened here. Groups with sessions but no
     /// timestamps still rank above sessionless projects.
-    var latestActivity: Date? {
+    public var latestActivity: Date? {
         sessions.compactMap(\.updated).max() ?? (sessions.isEmpty ? nil : .distantPast)
     }
 }
@@ -75,10 +75,17 @@ public enum ProjectGrouping {
             }
         }
 
-        // Recent activity floats up; sessionless projects keep the server's
-        // order (already recency-merged) below the active ones.
+        // The chat folder is pinned first: "just ask something" needs a
+        // fixed spot, not a place in a list that reshuffles with every
+        // turn. Below it, recent activity floats up; sessionless projects
+        // keep the server's order (already recency-merged) below the
+        // active ones.
         return result.enumerated()
             .sorted { a, b in
+                let (left, right) = (a.element.project, b.element.project)
+                if (left.scratch == true) != (right.scratch == true) {
+                    return left.scratch == true
+                }
                 switch (a.element.latestActivity, b.element.latestActivity) {
                 case let (left?, right?) where left != right: return left > right
                 case (.some, .none): return true
@@ -87,5 +94,15 @@ public enum ProjectGrouping {
                 }
             }
             .map(\.element)
+    }
+
+    /// The one group a launcher opens by default: wherever something last
+    /// happened, so continuing the last conversation stays one tap. Not
+    /// simply the first group with sessions, because the pinned chat
+    /// folder would win that on every launch.
+    public static func defaultExpanded(_ groups: [ProjectGroup]) -> ProjectGroup? {
+        groups
+            .filter { !$0.sessions.isEmpty }
+            .max { ($0.latestActivity ?? .distantPast) < ($1.latestActivity ?? .distantPast) }
     }
 }

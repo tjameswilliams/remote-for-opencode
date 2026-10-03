@@ -5,6 +5,7 @@ import SwiftUI
 /// workspace the same way any two strangers talk in AppKit.
 enum WorkspaceCommand {
     static let newSession = Notification.Name("workspace.newSession")
+    static let newChat = Notification.Name("workspace.newChat")
     static let palette = Notification.Name("workspace.palette")
     static let toggleInspector = Notification.Name("workspace.toggleInspector")
     static let inspectorTab = Notification.Name("workspace.inspectorTab")   // userInfo["tab"]
@@ -31,6 +32,9 @@ struct WorkspaceCommands: Commands {
         CommandGroup(after: .newItem) {
             Button("New Session") { WorkspaceCommand.post(WorkspaceCommand.newSession) }
                 .keyboardShortcut("n", modifiers: .command)
+            // A conversation outside any project, in the chat folder.
+            Button("New Chat") { WorkspaceCommand.post(WorkspaceCommand.newChat) }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
         }
 
         CommandMenu("Session") {

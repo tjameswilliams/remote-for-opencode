@@ -55,20 +55,25 @@ struct WorkspaceWindow: View {
             state.paletteShown.toggle()
         }
         .onReceive(NotificationCenter.default.publisher(for: WorkspaceCommand.newSession)) { _ in
-            // A fresh conversation where you are, or in the first project
-            // when you're nowhere yet.
+            // A fresh conversation where you are, or a plain chat when
+            // you're nowhere yet (the first project, from a companion
+            // with no chat folder).
+            let fallback = state.chatProject ?? state.projects.first
             switch state.selection {
             case let .session(session):
                 if let project = state.projects.first(where: { $0.worktree == session.directory }) {
                     state.selection = .project(project)
-                } else if let first = state.projects.first {
-                    state.selection = .project(first)
+                } else if let fallback {
+                    state.selection = .project(fallback)
                 }
             case .project:
                 break   // already an empty conversation in that project
-            case .schedules, .modelSources, nil:
-                if let first = state.projects.first { state.selection = .project(first) }
+            case .schedules, .modelSources, .mcpServers, nil:
+                if let fallback { state.selection = .project(fallback) }
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: WorkspaceCommand.newChat)) { _ in
+            if let chat = state.chatProject { state.selection = .project(chat) }
         }
         .onReceive(NotificationCenter.default.publisher(for: WorkspaceCommand.toggleInspector)) { _ in
             state.inspectorShown.toggle()
@@ -127,6 +132,7 @@ struct WorkspaceWindow: View {
         case let .project(project): storedSelection = "project:\(project.worktree)"
         case .schedules: storedSelection = "schedules"
         case .modelSources: storedSelection = "modelSources"
+        case .mcpServers: storedSelection = "mcpServers"
         case nil: storedSelection = ""
         }
     }
@@ -147,6 +153,8 @@ struct WorkspaceWindow: View {
             state.selection = .schedules
         } else if storedSelection == "modelSources" {
             state.selection = .modelSources
+        } else if storedSelection == "mcpServers" {
+            state.selection = .mcpServers
         }
     }
 
@@ -163,10 +171,12 @@ struct WorkspaceWindow: View {
             }
         case .modelSources:
             ModelSourcesView(store: modelSources)
+        case .mcpServers:
+            McpServersView(store: state.mcpServers)
         case nil:
             VStack(spacing: 16) {
                 BrandWordmark(height: 14, color: .inkFaint)
-                Text("Pick a session to continue, or a project to start one.")
+                Text("Start a chat, pick a session to continue, or a project to work in.")
                     .font(.callout)
                     .foregroundStyle(Color.inkMuted)
             }
@@ -186,7 +196,9 @@ struct WorkspaceWindow: View {
         case let .session(session):
             (session.directory ?? "", session.id, session.title ?? "Session")
         case let .project(project):
-            (project.worktree, nil, project.displayName)
+            // A fresh chat is titled for what it is, not for the folder
+            // that quietly holds it.
+            (project.worktree, nil, project.scratch == true ? "New Chat" : project.displayName)
         default:
             nil
         }

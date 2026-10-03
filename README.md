@@ -123,8 +123,11 @@ Mac, check both devices are on the same network and iCloud account.
 
 ### 4. Your first session
 
-Pick a project, type (or dictate) a prompt, and watch the turn happen:
-the agent's reasoning, each tool call, and the streamed answer. When it
+Pick a project, or tap New Chat for a conversation that belongs to no
+project (it runs in a scratch folder the companion owns, so nothing the
+agent writes lands in your code). Type (or dictate) a prompt and watch
+the turn happen: the agent's reasoning, each tool call, and the streamed
+answer. When it
 wants to run a command you get an approval card sized to the risk; when
 it edits files you get a per-file diff to read before you say the word.
 Attach a photo (a whiteboard, an error on another screen) and it goes
@@ -141,10 +144,16 @@ The companion's window is a full desktop client for the same sessions:
 sidebar of Macs, sessions, and projects; the conversation in the middle;
 Changes, Plan, and Approvals in an inspector. Files arrive by drag, paste,
 or the open panel, and ⌘K opens a palette over sessions and slash
-commands. Two companion features live only on the Mac:
+commands. Three features live in the companion and are reachable from
+either device:
 
 - **Scheduled tasks** run a prompt on a schedule, per project, and are
   editable from the phone as well.
+- **MCP Servers** manages the servers in OpenCode's global config from
+  either device: add, edit, remove, and choose which ones a new
+  conversation starts with. The companion also serves a few management
+  tools of its own to OpenCode, so a chat can add or remove a server for
+  you; those tools stay hidden from project sessions unless switched on.
 - **Model Sources** keeps OpenCode's custom-provider block in step with
   local OpenAI-style endpoints (vLLM, llama.cpp, LM Studio, a proxy in
   front of several). Nothing is written to your config unreviewed. See

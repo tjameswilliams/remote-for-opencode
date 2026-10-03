@@ -15,11 +15,13 @@ struct CommandKPalette: View {
     @FocusState private var focused: Bool
 
     private enum Entry: Identifiable {
+        case newChat(Project)
         case session(Session)
         case command(AgentCommand)
 
         var id: String {
             switch self {
+            case .newChat: return "new-chat"
             case let .session(s): return "session-\(s.id)"
             case let .command(c): return "command-\(c.name)"
             }
@@ -28,6 +30,11 @@ struct CommandKPalette: View {
 
     private var entries: [Entry] {
         let needle = query.lowercased()
+        // A fresh chat leads while the field is empty or is being asked
+        // for by name; a title search shouldn't have to arrow past it.
+        let newChat: [Entry] = state.chatProject.map { chat in
+            needle.isEmpty || "new chat".contains(needle) ? [.newChat(chat)] : []
+        } ?? []
         let sessions = state.sessions
             .filter { needle.isEmpty || ($0.title ?? "").lowercased().contains(needle) }
             .prefix(6)
@@ -35,7 +42,7 @@ struct CommandKPalette: View {
         let commands = state.commands.matching(query)
             .prefix(8)
             .map(Entry.command)
-        return Array(sessions) + Array(commands)
+        return newChat + Array(sessions) + Array(commands)
     }
 
     var body: some View {
@@ -90,6 +97,16 @@ struct CommandKPalette: View {
     private func row(_ entry: Entry, selected: Bool) -> some View {
         HStack(spacing: 10) {
             switch entry {
+            case .newChat:
+                Image(systemName: "plus.bubble")
+                    .foregroundStyle(Color.inkMuted)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("New Chat")
+                    Text("A conversation outside any project")
+                        .font(.caption)
+                        .foregroundStyle(Color.inkMuted)
+                }
             case let .session(session):
                 Image(systemName: "bubble.left.and.text.bubble.right")
                     .foregroundStyle(Color.inkMuted)
@@ -131,6 +148,8 @@ struct CommandKPalette: View {
         let pick = index ?? highlighted
         guard entries.indices.contains(pick) else { dismiss(); return }
         switch entries[pick] {
+        case let .newChat(chat):
+            state.selection = .project(chat)
         case let .session(session):
             state.selection = .session(session)
         case let .command(command):

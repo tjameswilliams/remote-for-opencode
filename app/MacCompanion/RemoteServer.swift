@@ -346,11 +346,13 @@ private final class Connection {
             answer {
                 guard let directory = request.project else { return [] }
                 var e = Wire.Event(kind: "mcp")
-                e.mcp = try await adapter.mcpServers(
-                    directory: directory, sessionID: request.session
+                e.mcp = try await McpRegistry.shared.servers(
+                    directory: directory, sessionID: request.session, adapter: adapter
                 )
                 return [e]
             }
+        case "mcp.list", "mcp.save", "mcp.remove", "mcp.defaults", "mcp.restart":
+            serveMcp(request, adapter: adapter)
         case "prompt":
             servePrompt(request, adapter: adapter)
         case "watch":
@@ -491,6 +493,58 @@ private final class Connection {
         }
     }
 
+    /// The global MCP server requests: the roster in the Mac's
+    /// opencode.json, edits to it, and per-server defaults. Every one
+    /// answers with the complete list, like the schedules, so a client
+    /// replaces its copy with the Mac's truth. Live effects land in the
+    /// chat folder's instance unless the request names a project.
+    private func serveMcp(_ request: Wire.Request, adapter: OpenCodeAdapter) {
+        let registry = McpRegistry.shared
+        let directory = request.project ?? ChatFolder.path
+        func list() async throws -> [Wire.Event] {
+            var e = Wire.Event(kind: "mcp")
+            e.mcp = try await registry.servers(directory: directory, sessionID: nil, adapter: adapter)
+            e.restartNeeded = ModelSourceStore.shared.restartNeeded ? true : nil
+            e.configPath = registry.configPath
+            return [e]
+        }
+        switch request.kind {
+        case "mcp.list":
+            answer { try await list() }
+        case "mcp.save":
+            answer {
+                guard let server = request.server else { return [] }
+                try await registry.save(server, directory: directory)
+                return try await list()
+            }
+        case "mcp.remove":
+            answer {
+                guard let name = request.name else { return [] }
+                try await registry.remove(name, directory: directory)
+                return try await list()
+            }
+        case "mcp.defaults":
+            answer {
+                registry.setDefaults(request.mcp ?? [:])
+                return try await list()
+            }
+        case "mcp.restart":
+            answer {
+                // The user's explicit choice, turns or no turns, exactly
+                // like the pane's own button. The list that follows is
+                // read from the restarted server once it answers.
+                ModelSourceStore.shared.restartNow()
+                registry.noteRestarted()
+                var e = Wire.Event(kind: "mcp")
+                e.mcp = []
+                e.configPath = registry.configPath
+                return [e]
+            }
+        default:
+            answerUnknown(request.kind)
+        }
+    }
+
     @MainActor
     private static func schedulesEvent(_ scheduler: Scheduler) -> Wire.Event {
         var e = Wire.Event(kind: "schedules")
@@ -499,13 +553,19 @@ private final class Connection {
         return e
     }
 
-    /// The whole project launcher in one event: known projects (OpenCode's
-    /// history, recency-sorted) first, then folders the user pinned by
-    /// hand, then repos discovered on disk that OpenCode has never opened.
-    /// The same answer serves "projects" and both folder edits, so a
-    /// client's list is always the merged truth, never its own guess.
+    /// The whole project launcher in one event: the chat folder first,
+    /// then known projects (OpenCode's history, recency-sorted), then
+    /// folders the user pinned by hand, then repos discovered on disk that
+    /// OpenCode has never opened. The same answer serves "projects" and
+    /// both folder edits, so a client's list is always the merged truth,
+    /// never its own guess.
     private static func projectsEvent(adapter: OpenCodeAdapter) async throws -> Wire.Event {
-        var projects = try await adapter.projects()
+        // OpenCode files the chat folder under its synthetic `global`
+        // project (already dropped by the adapter), so it never comes
+        // back as a known project; the filter is belt and braces against
+        // a future version that records it.
+        var projects = try await adapter.projects().filter { $0.worktree != ChatFolder.path }
+        projects.insert(ChatFolder.project(), at: 0)
         var seen = Set(projects.map(\.worktree))
         // Pinned folders outrank discovery: the user said this one matters.
         // Once OpenCode opens one it shows up in `known` and the pin goes
@@ -723,10 +783,18 @@ enum TurnRunner {
             // before anything is invoked. On the session rather than the
             // prompt body because command turns have no tools field, and
             // because the session persisting them is what lets a thread
-            // configured here keep its toolset in the TUI.
+            // configured here keep its toolset in the TUI. A fresh session
+            // first gets the Mac's defaults, so a client that sent no map
+            // (it never opened the menu, or predates defaults) still starts
+            // the way the user set; a map that did arrive is the final word.
+            if request.session == nil {
+                await McpRegistry.shared.applyDefaults(
+                    sessionID: sessionID, directory: directory, adapter: adapter
+                )
+            }
             if let servers = request.mcp {
-                try await adapter.setMcp(
-                    sessionID: sessionID, directory: directory, servers: servers
+                try await McpRegistry.shared.setConversation(
+                    servers, sessionID: sessionID, directory: directory, adapter: adapter
                 )
             }
 

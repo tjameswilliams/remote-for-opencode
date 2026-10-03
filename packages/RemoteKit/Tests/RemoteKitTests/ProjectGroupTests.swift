@@ -68,6 +68,35 @@ struct ProjectGroupTests {
         #expect(orphan?.project.worktree.isEmpty == true)
     }
 
+    @Test("The chat folder is pinned first, whatever else is fresher")
+    func chatFolderPinned() {
+        let chats = Project(id: "chats", worktree: "/Users/t/Chats", name: "Chats", scratch: true)
+        let sessions = [
+            Session(id: "s1", directory: "/Users/t/site", updated: date(daysAgo: 0)),
+            Session(id: "s2", directory: "/Users/t/Chats", updated: date(daysAgo: 4)),
+        ]
+        let groups = ProjectGrouping.groups(projects: [chats, app, site], sessions: sessions)
+        #expect(groups.map(\.project.id) == ["chats", "p2", "p1"])
+        #expect(groups[0].sessions.map(\.id) == ["s2"])
+        // An empty chat folder still leads.
+        let empty = ProjectGrouping.groups(projects: [app, chats, site], sessions: Array(sessions.prefix(1)))
+        #expect(empty.map(\.project.id) == ["chats", "p2", "p1"])
+    }
+
+    @Test("The default-open group is the freshest, not the pinned one")
+    func defaultExpanded() {
+        let chats = Project(id: "chats", worktree: "/Users/t/Chats", name: "Chats", scratch: true)
+        let sessions = [
+            Session(id: "s1", directory: "/Users/t/site", updated: date(daysAgo: 0)),
+            Session(id: "s2", directory: "/Users/t/Chats", updated: date(daysAgo: 4)),
+        ]
+        let groups = ProjectGrouping.groups(projects: [chats, app, site], sessions: sessions)
+        #expect(ProjectGrouping.defaultExpanded(groups)?.id == "p2")
+        #expect(ProjectGrouping.defaultExpanded(
+            ProjectGrouping.groups(projects: [chats, app], sessions: [])
+        ) == nil)
+    }
+
     @Test("Search keeps name matches and session matches, drops the rest")
     func search() {
         // The server already filtered sessions to the query; only the

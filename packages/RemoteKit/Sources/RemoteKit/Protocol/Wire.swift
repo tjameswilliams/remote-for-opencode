@@ -37,7 +37,8 @@ public enum Wire {
         /// "status" | "projects" | "sessions" | "models" | "mcp" |
         /// "prompt" | "resume" | "abort" | "permission" | "question" |
         /// "pending" | "transcript" | "project.add" | "project.remove" |
-        /// "watch"
+        /// "watch" | "schedule.*" | "mcp.list" | "mcp.save" |
+        /// "mcp.remove" | "mcp.defaults" | "mcp.restart"
         ///
         /// "watch" (session + project) is the one subscription: the Mac
         /// relays the session's live events — parts, todos, diffs,
@@ -101,6 +102,14 @@ public enum Wire {
         /// which is what keeps an oblivious client from erasing rules
         /// another one set. "mcp" (list) answers with the same names.
         public var mcp: [String: Bool]?
+        /// mcp.save: the server definition to add or replace in the Mac's
+        /// global opencode.json (matched by name). mcp.remove names the
+        /// server in `name`. mcp.defaults carries the per-server defaults
+        /// to set in `mcp` (only the named ones change). Every mcp.*
+        /// request answers with a fresh `mcp` event listing every server.
+        public var server: McpServerConfig?
+        /// mcp.remove: which server.
+        public var name: String?
         /// schedule.save: the task to create or replace (matched by id).
         /// Every schedule.* request answers with a fresh `schedules` event,
         /// so a client's list is always the Mac's truth.
@@ -176,8 +185,14 @@ public enum Wire {
         public var changes: WorkingChanges?
         /// On `mcp`: the MCP servers this OpenCode configures, with their
         /// status and, when the request named a session, whether that
-        /// session exposes each one's tools.
+        /// session exposes each one's tools; otherwise the defaults.
         public var mcp: [McpServer]?
+        /// On `mcp`: the global config changed in a way OpenCode reads only
+        /// at startup (a server added or removed), and the Mac's `opencode
+        /// serve` hasn't been restarted yet. `mcp.restart` does that.
+        public var restartNeeded: Bool?
+        /// On `mcp`: the file the Mac edits, so the page can say where.
+        public var configPath: String?
         /// On `models`: what this Mac's OpenCode is configured to run.
         public var models: [AgentModel]?
         /// On `models`: the one used when the phone doesn't pick.

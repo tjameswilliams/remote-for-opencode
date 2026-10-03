@@ -30,10 +30,13 @@ struct HomeView: View {
     /// The Mac's scheduled tasks; created here so the list survives
     /// pushing in and out of the schedules screen.
     @StateObject private var schedules = ScheduleStore()
+    /// The Mac's MCP servers and their defaults, same lifetime reasoning.
+    @StateObject private var mcpServers = McpRegistryStore()
     /// Bound so screens without a link of their own (the schedules page
     /// opening a run's output) can still push.
     @State private var path = NavigationPath()
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -44,6 +47,8 @@ struct HomeView: View {
                             .foregroundStyle(Color.inkMuted)
                     }
                 }
+                chatSection
+                toolsSection
                 groupSection
             }
             .navigationBarTitleDisplayMode(.inline)
@@ -52,10 +57,21 @@ struct HomeView: View {
                     // 15 rather than 13: five rows of whole-point cells.
                     BrandWordmark(height: 15, color: .ink)
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink(value: Destination.schedules) {
-                        Image(systemName: "clock.badge")
-                            .accessibilityLabel("Scheduled tasks")
+                // A phone's bar has room for the wordmark and the status
+                // dot, not for two more buttons: there they are rows in the
+                // list instead (see toolsSection).
+                if sizeClass != .compact {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        NavigationLink(value: Destination.schedules) {
+                            Image(systemName: "clock.badge")
+                                .accessibilityLabel("Scheduled tasks")
+                        }
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        NavigationLink(value: Destination.mcpServers) {
+                            Image(systemName: "wrench.and.screwdriver")
+                                .accessibilityLabel("MCP servers")
+                        }
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -79,9 +95,11 @@ struct HomeView: View {
                         title: session.title ?? "Session"
                     )
                 case let .project(project):
+                    // A fresh chat is titled for what it is, not for the
+                    // folder that quietly holds it.
                     SessionView(
                         project: project.worktree, session: nil,
-                        title: project.displayName
+                        title: project.scratch == true ? "New Chat" : project.displayName
                     )
                 case .schedules:
                     ScheduleListView(
@@ -89,6 +107,8 @@ struct HomeView: View {
                     ) { session in
                         path.append(session)
                     }
+                case .mcpServers:
+                    McpServersView(store: mcpServers)
                 }
             }
             // ScheduleListView pushes Session values directly; they land
@@ -150,6 +170,7 @@ struct HomeView: View {
         case session(Session)
         case project(Project)
         case schedules
+        case mcpServers
     }
 
     private func load() async {
@@ -180,7 +201,41 @@ struct HomeView: View {
     /// The one project open by default: the freshest, so "continue where I
     /// left off" is the state the launcher arrives in.
     private var defaultExpandedID: String? {
-        groups.first { !$0.sessions.isEmpty }?.id
+        ProjectGrouping.defaultExpanded(groups)?.id
+    }
+
+    /// The very first row, where Claude Code and Codex keep theirs: a
+    /// conversation that belongs to no project. Absent while the project
+    /// list is still on its way, from a companion too old to send a chat
+    /// folder, and during a search (which is for finding, not starting).
+    @ViewBuilder
+    private var chatSection: some View {
+        if search.isEmpty, let chat = projects.first(where: { $0.scratch == true }) {
+            Section {
+                NavigationLink(value: Destination.project(chat)) {
+                    Label("New Chat", systemImage: "plus.bubble")
+                        .foregroundStyle(Color.ink)
+                }
+            }
+        }
+    }
+
+    /// The toolbar's two destinations, as rows, where the bar is too
+    /// narrow to hold them beside the wordmark.
+    @ViewBuilder
+    private var toolsSection: some View {
+        if search.isEmpty, sizeClass == .compact {
+            Section {
+                NavigationLink(value: Destination.schedules) {
+                    Label("Scheduled Tasks", systemImage: "clock.badge")
+                        .foregroundStyle(Color.ink)
+                }
+                NavigationLink(value: Destination.mcpServers) {
+                    Label("MCP Servers", systemImage: "wrench.and.screwdriver")
+                        .foregroundStyle(Color.ink)
+                }
+            }
+        }
     }
 
     private func isExpanded(_ group: ProjectGroup) -> Bool {
@@ -196,8 +251,10 @@ struct HomeView: View {
                 projectRow(group)
                 if isExpanded(group) {
                     // Searching means looking for a conversation, not a
-                    // place to start one.
-                    if search.isEmpty, !group.project.worktree.isEmpty {
+                    // place to start one. The chat folder's "new" row is
+                    // the one at the top of the screen.
+                    if search.isEmpty, !group.project.worktree.isEmpty,
+                       group.project.scratch != true {
                         NavigationLink(value: Destination.project(group.project)) {
                             Label("New Session", systemImage: "plus")
                                 .foregroundStyle(Color.inkMuted)

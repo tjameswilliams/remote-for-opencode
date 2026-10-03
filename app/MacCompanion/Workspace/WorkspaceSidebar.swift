@@ -30,6 +30,7 @@ struct WorkspaceSidebar: View {
 
     var body: some View {
         List(selection: $selected) {
+            chatSection
             scheduledSection
             macSection
             if let error = state.error {
@@ -93,12 +94,31 @@ struct WorkspaceSidebar: View {
         }
     }
 
+    /// The very first row, where Claude Code and Codex keep theirs: a
+    /// conversation that belongs to no project. Absent only while the
+    /// project list is still on its way (or from a companion too old to
+    /// send a chat folder).
+    @ViewBuilder
+    private var chatSection: some View {
+        if let chat = state.chatProject {
+            Section {
+                Label("New Chat", systemImage: "plus.bubble")
+                    .tag(WorkspaceSelection.project(chat))
+                    .help("Start a conversation outside any project (⇧⌘N)")
+            }
+        }
+    }
+
     /// The standing entry above everything else: what this Mac runs on
     /// its own, reachable without hunting through the toolbar.
     private var scheduledSection: some View {
         Section {
             Label("Scheduled", systemImage: "clock.badge")
                 .tag(WorkspaceSelection.schedules)
+            // Over the wire, so it works for a remote Mac too: its own
+            // opencode.json is what gets edited.
+            Label("MCP Servers", systemImage: "wrench.and.screwdriver")
+                .tag(WorkspaceSelection.mcpServers)
             // Edits this Mac's own opencode.json, so a remote Mac's
             // workspace has nothing to show here.
             if state.activePeer == nil {
@@ -205,7 +225,7 @@ struct WorkspaceSidebar: View {
     /// The one project open by default: the freshest, so continuing the
     /// last conversation is the state the sidebar arrives in.
     private var defaultExpandedID: String? {
-        groups.first { !$0.sessions.isEmpty }?.id
+        ProjectGrouping.defaultExpanded(groups)?.id
     }
 
     private func isExpanded(_ group: ProjectGroup) -> Bool {
@@ -221,8 +241,10 @@ struct WorkspaceSidebar: View {
                 projectRow(group)
                 if isExpanded(group) {
                     // Searching means looking for a conversation, not a
-                    // place to start one.
-                    if state.search.isEmpty, !group.project.worktree.isEmpty {
+                    // place to start one. The chat folder's "new" row is
+                    // the one at the top of the sidebar.
+                    if state.search.isEmpty, !group.project.worktree.isEmpty,
+                       group.project.scratch != true {
                         Label("New Session", systemImage: "plus")
                             .font(.callout)
                             .foregroundStyle(Color.inkMuted)
@@ -297,7 +319,7 @@ struct WorkspaceSidebar: View {
         )
         .contextMenu {
             if !group.project.worktree.isEmpty {
-                Button("New Session") {
+                Button(group.project.scratch == true ? "New Chat" : "New Session") {
                     state.selection = .project(group.project)
                 }
             }
