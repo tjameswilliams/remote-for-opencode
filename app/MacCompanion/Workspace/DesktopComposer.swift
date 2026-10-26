@@ -42,6 +42,13 @@ struct DesktopComposer: View {
                 .onSubmit(onSend)
                 .onChange(of: input) { old, new in liftLargeInsertion(from: old, to: new) }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // A tap anywhere near the text focuses it, not only on the
+                // line itself, and the bottom padding is the gutter that keeps
+                // a tap meant for the text off the controls below.
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+                .onTapGesture { focused = true }
+                .padding(.bottom, 6)
 
             HStack(spacing: 8) {
                 addButton
@@ -67,8 +74,11 @@ struct DesktopComposer: View {
                 .keyboardShortcut(running ? "." : .return, modifiers: .command)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        // Room around the text on the top and sides; the bottom stays
+        // tighter because the controls carry their own padding.
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
+        .padding(.bottom, 10)
         .background(
             RoundedRectangle(cornerRadius: Radius.composer, style: .continuous)
                 .fill(Color.primary.opacity(0.06))

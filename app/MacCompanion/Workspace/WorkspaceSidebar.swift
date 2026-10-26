@@ -22,6 +22,9 @@ struct WorkspaceSidebar: View {
     /// Disclosure the user has set by hand, by project id. Anything absent
     /// falls back to the default: only the freshest project open.
     @State private var toggled: [String: Bool] = [:]
+    /// How many conversations each expanded project shows, by group id.
+    /// A project can hold hundreds; they arrive newest first, a page at a time.
+    @State private var shown: [String: Int] = [:]
     /// This Mac's folders come from a real picker; a remote Mac's disk
     /// can't be browsed from here, so its path gets typed instead.
     @State private var pickingFolder = false
@@ -251,9 +254,10 @@ struct WorkspaceSidebar: View {
                             .padding(.leading, indent)
                             .tag(WorkspaceSelection.project(group.project))
                     }
-                    ForEach(group.sessions) { session in
+                    ForEach(group.sessions.prefix(visibleCount(group))) { session in
                         sessionRow(session)
                     }
+                    showMoreRow(group)
                 }
             }
             if state.search.isEmpty {
@@ -281,6 +285,35 @@ struct WorkspaceSidebar: View {
     /// Nested rows sit past the disclosure chevron's column, so a group
     /// reads as one indented block under its project.
     private let indent: CGFloat = 16
+
+    /// Conversations per page in an expanded project.
+    private static let pageSize = 10
+
+    /// A search shows every match: a result paged out of sight would be a
+    /// result withheld.
+    private func visibleCount(_ group: ProjectGroup) -> Int {
+        state.search.isEmpty ? shown[group.id] ?? Self.pageSize : group.sessions.count
+    }
+
+    @ViewBuilder
+    private func showMoreRow(_ group: ProjectGroup) -> some View {
+        let remaining = group.sessions.count - visibleCount(group)
+        if remaining > 0 {
+            Button {
+                withAnimation(Motion.easeOut(0.25)) {
+                    shown[group.id] = visibleCount(group) + Self.pageSize
+                }
+            } label: {
+                Label("Show \(min(remaining, Self.pageSize)) More", systemImage: "ellipsis")
+                    .font(.callout)
+                    .foregroundStyle(Color.inkMuted)
+                    .padding(.leading, indent)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Show more conversations, \(remaining) hidden")
+        }
+    }
 
     private func projectRow(_ group: ProjectGroup) -> some View {
         Button {

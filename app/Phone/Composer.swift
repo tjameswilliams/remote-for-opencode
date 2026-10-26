@@ -21,6 +21,7 @@ struct Composer: View {
     let onSend: () -> Void
 
     @State private var photoSelection: [PhotosPickerItem] = []
+    @FocusState private var focused: Bool
     @State private var showingPhotos = false
     @State private var showingFiles = false
     @State private var showingCamera = false
@@ -45,7 +46,15 @@ struct Composer: View {
             )
             .textFieldStyle(.plain)
             .lineLimit(1 ... 6)
+            .focused($focused)
             .frame(maxWidth: .infinity, alignment: .leading)
+            // A tap anywhere near the text focuses it, not only on the
+            // line itself, and the bottom padding is the gutter that keeps
+            // a tap meant for the text off the controls below.
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .onTapGesture { focused = true }
+            .padding(.bottom, 6)
 
             HStack(spacing: 8) {
                 addMenu
@@ -79,8 +88,11 @@ struct Composer: View {
                 .accessibilityLabel(running ? "Stop the agent" : "Send")
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        // Room around the text on the top and sides; the bottom stays
+        // tighter because the controls carry their own padding.
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
+        .padding(.bottom, 10)
         .background(
             RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .fill(Color.primary.opacity(0.06))
