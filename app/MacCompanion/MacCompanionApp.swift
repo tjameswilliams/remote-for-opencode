@@ -15,8 +15,7 @@ struct MacCompanionApp: App {
     /// The companion's own MCP server, for the global chat's management
     /// tools. Started before OpenCode so the first connection attempt
     /// finds it listening.
-    private let tools = ToolServer(registry: McpRegistry.shared)
-    @State private var started = false
+    private let tools: ToolServer
     /// Sparkle drives its own update checks against the appcast; this also
     /// backs the menu's manual "Check for Updates…". The app is distributed
     /// outside the App Store (brew cask / direct dmg), so updating is ours
@@ -26,9 +25,11 @@ struct MacCompanionApp: App {
     /// `SUPublicEDKey` as a fatal error and kills the app on launch, so the
     /// updater only starts once `updatesConfigured` has vetted the build —
     /// which also keeps Debug builds off the update channel entirely.
-    private let updater = SPUStandardUpdaterController(
-        startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil
-    )
+    private let updater: SPUStandardUpdaterController
+
+    /// Set by the first launch of the services, so a second `init` (SwiftUI
+    /// does not promise exactly one) can never start them twice.
+    @MainActor private static var started = false
 
     /// Whether this build can actually check for updates. False in
     /// development, which is why the menu item hides rather than lying.
@@ -53,21 +54,36 @@ struct MacCompanionApp: App {
     init() {
         let opencode = OpenCodeProcess()
         _opencode = StateObject(wrappedValue: opencode)
-        let adapter: () -> OpenCodeAdapter? = { [weak opencode] in
-            guard case let .running(port, _) = opencode?.state else { return nil }
-            return OpenCodeAdapter(port: port)
-        }
+        let adapter: () -> OpenCodeAdapter? = { [weak opencode] in opencode?.adapter }
         let scheduler = Scheduler(adapter: adapter)
         _scheduler = StateObject(wrappedValue: scheduler)
         // Built eagerly rather than in onAppear so the menu can observe its
         // conflict state from the first frame — a second instance must be
         // able to say so before the user opens anything.
-        _server = StateObject(wrappedValue: RemoteServer(adapter: adapter, scheduler: scheduler))
+        let server = RemoteServer(adapter: adapter, scheduler: scheduler)
+        _server = StateObject(wrappedValue: server)
         // Applying a model change ends in a restart of our own `opencode
         // serve`, held back while a turn is mid-flight.
         ModelSourceStore.shared.restartOpenCode = { [weak opencode] in opencode?.restart() }
         ModelSourceStore.shared.activeTurns = { LiveTurns.shared.activeCount }
         McpRegistry.shared.adapter = adapter
+        let tools = ToolServer(registry: McpRegistry.shared)
+        self.tools = tools
+        let updater = SPUStandardUpdaterController(
+            startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil
+        )
+        self.updater = updater
+        let modelSources = ModelSourceStore.shared
+        // Everything starts at launch, not when the menu first opens: a
+        // companion launched at login has to serve the phone before anyone
+        // clicks its icon. Deferred one turn of the main loop so the app has
+        // finished launching before listeners and child processes start.
+        Task { @MainActor in
+            Self.bootstrap(
+                opencode: opencode, server: server, scheduler: scheduler,
+                modelSources: modelSources, tools: tools, updater: updater
+            )
+        }
     }
 
     var body: some Scene {
@@ -76,7 +92,6 @@ struct MacCompanionApp: App {
                 opencode: opencode, phone: phone, server: server, modelSources: modelSources,
                 updater: Self.updatesConfigured ? updater : nil
             )
-            .onAppear(perform: bootstrap)
         }
 
         Window("Workspace", id: "workspace") {
@@ -99,10 +114,14 @@ struct MacCompanionApp: App {
         }
     }
 
-    private func bootstrap() {
+    @MainActor
+    private static func bootstrap(
+        opencode: OpenCodeProcess, server: RemoteServer, scheduler: Scheduler,
+        modelSources: ModelSourceStore, tools: ToolServer, updater: SPUStandardUpdaterController
+    ) {
         guard !started else { return }
         started = true
-        if Self.updatesConfigured { updater.startUpdater() }
+        if updatesConfigured { updater.startUpdater() }
         // The tool server's config entry must be in the file before
         // OpenCode reads it, and the listener up before OpenCode connects.
         McpRegistry.shared.registerToolServer()

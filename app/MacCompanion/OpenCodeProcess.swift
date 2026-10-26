@@ -1,4 +1,5 @@
 import RemoteKit
+import AppKit
 import Foundation
 import OSLog
 
@@ -24,6 +25,31 @@ final class OpenCodeProcess: ObservableObject {
 
     @Published private(set) var state: State = .stopped
 
+    /// Which generation of OpenCode's API the running server speaks,
+    /// probed once it answers. Meaningful only while `running`.
+    private(set) var api: OpenCodeAdapter.API = .v1
+
+    /// The password the current child was started with. OpenCode 2 always
+    /// requires one (it generates its own when none is given), so the
+    /// companion picks a fresh one per launch and is the only holder. A 1.x
+    /// server ignores it.
+    private(set) var password = OpenCodeProcess.makePassword()
+
+    /// The adapter for the running server, nil while it isn't.
+    var adapter: OpenCodeAdapter? {
+        guard case let .running(port, _) = state else { return nil }
+        return OpenCodeAdapter(port: port, api: api, password: password)
+    }
+
+    private static func makePassword() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return Data(bytes).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
     private let logger = Logger(subsystem: "com.timwilliams.opencodego", category: "opencode")
     private var process: Process?
     private var restartAttempts = 0
@@ -33,11 +59,24 @@ final class OpenCodeProcess: ObservableObject {
     /// available to a GUI app (no login-shell PATH), so known locations
     /// first, then a login shell as the fallback for exotic setups.
     static func findBinary() -> String? {
+        // A developer override, for running the companion against a
+        // particular OpenCode (the kept 1.x install, say) without touching
+        // the one on PATH:
+        //   defaults write com.timwilliams.opencodego.mac OpenCodeBinary ~/.local/bin/opencode-v1
+        // `defaults delete … OpenCodeBinary` goes back to the search below.
+        if let override = UserDefaults.standard.string(forKey: "OpenCodeBinary"), !override.isEmpty {
+            let path = NSString(string: override).expandingTildeInPath
+            if FileManager.default.isExecutableFile(atPath: path) { return path }
+        }
         let candidates = [
             "/opt/homebrew/bin/opencode",
             "/usr/local/bin/opencode",
             NSString(string: "~/.bun/bin/opencode").expandingTildeInPath,
             NSString(string: "~/.opencode/bin/opencode").expandingTildeInPath,
+            // OpenCode 2's npm package also installs itself as `opencode2`,
+            // so a side-by-side install still has something to find.
+            "/opt/homebrew/bin/opencode2",
+            "/usr/local/bin/opencode2",
         ]
         if let found = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
             return found
@@ -110,6 +149,42 @@ final class OpenCodeProcess: ObservableObject {
         state = .stopped
     }
 
+    /// The app is quitting: take the child down with it. Children outlive
+    /// their parent, so without this every quit left an `opencode serve`
+    /// running until the next launch's pidfile reaper found it (and only
+    /// the most recent one at that). Waits a moment for the exit; if the
+    /// child is still alive after that, the pidfile is kept so the next
+    /// launch can still finish the job.
+    func stopForQuit() {
+        stopping = true
+        guard let process, process.isRunning else {
+            try? FileManager.default.removeItem(at: Self.pidfile)
+            return
+        }
+        process.terminate()
+        let deadline = Date().addingTimeInterval(2)
+        while process.isRunning, Date() < deadline {
+            usleep(50_000)
+        }
+        if process.isRunning {
+            logger.error("opencode serve (pid \(process.processIdentifier)) outlived quit; next launch reaps it")
+        } else {
+            try? FileManager.default.removeItem(at: Self.pidfile)
+        }
+        self.process = nil
+    }
+
+    init() {
+        // AppKit's last word before exit, posted on the main thread for
+        // Quit, logout and shutdown alike. (A force quit or Xcode's Stop
+        // sends no notice; the pidfile covers those.)
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stopForQuit() }
+        }
+    }
+
     /// A deliberate stop and fresh launch: how a config change reaches
     /// OpenCode, which reads its global config only at startup. The
     /// restart counter resets so this never reads as a crash.
@@ -136,6 +211,11 @@ final class OpenCodeProcess: ObservableObject {
         // The CLI shells out to git and friends; a GUI app's PATH lacks
         // their usual homes.
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
+        // OpenCode 2 reads its server password from here; without it, it
+        // would mint one we'd have to scrape off stdout.
+        password = Self.makePassword()
+        env["OPENCODE_PASSWORD"] = password
+        env.removeValue(forKey: "OPENCODE_SERVER_PASSWORD")
         p.environment = env
 
         let out = Pipe()
@@ -189,16 +269,17 @@ final class OpenCodeProcess: ObservableObject {
     }
 
     /// The port is known; prove the server actually answers before calling
-    /// it running — a health check is cheap and `/global/health` carries the
-    /// version the capability handshake wants anyway.
+    /// it running, and learn which API generation it speaks. The health
+    /// check is cheap and carries the version the capability handshake
+    /// wants anyway.
     private func confirm(port: Int) {
         Task { @MainActor in
-            let adapter = OpenCodeAdapter(port: port)
             for attempt in 0 ..< 20 {
-                if let health = try? await adapter.health(), health.healthy {
-                    state = .running(port: port, version: health.version)
+                if let probe = await OpenCodeAdapter.probe(port: port, password: password) {
+                    api = probe.api
+                    state = .running(port: port, version: probe.version)
                     restartAttempts = 0
-                    logger.notice("opencode \(health.version, privacy: .public) on port \(port)")
+                    logger.notice("opencode \(probe.version, privacy: .public) (\(probe.api.rawValue, privacy: .public) API) on port \(port)")
                     return
                 }
                 try? await Task.sleep(for: .milliseconds(250 * (attempt + 1)))

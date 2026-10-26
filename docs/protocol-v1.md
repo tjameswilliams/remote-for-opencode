@@ -482,6 +482,47 @@ Turn lifecycle as observed: `session.status` → parts stream →
 Adapter rule: subscribe to both old and new event names; detect once via
 `/doc` and cache per server version.
 
+## OpenCode 2.x (verified on 2.1.4)
+
+OpenCode 2 is the mainline from 2026-10-26: new work targets it first,
+and the 1.x path is maintenance only (keep it working, add nothing that
+needs it). To test 1.x, point the companion at a 1.x binary:
+
+    defaults write com.timwilliams.opencodego.mac OpenCodeBinary ~/.local/bin/opencode-v1
+
+and relaunch it; `defaults delete com.timwilliams.opencodego.mac
+OpenCodeBinary` returns it to the `opencode` on PATH. Give a 1.x install its
+own `XDG_DATA_HOME`: both generations use `opencode/opencode.db` there, 2.x
+migrates it on first start into new tables (1.x can still open it, but the
+two histories diverge from then on).
+
+OpenCode 2 replaced the HTTP API outright; there is no 1.x compatibility
+layer. The companion supports both generations. `OpenCodeAdapter.probe`
+asks `GET /api/info` first (2.x's web app answers every unknown path,
+`/global/health` included, with a 200 and HTML), then falls back to
+`/global/health`. The 2.x path lives in `OpenCodeAdapterV2.swift`
+(requests) and `OpenCodeEventsV2.swift` (events), and both translate
+back into the 1.x shapes, so nothing past the adapter branches.
+
+| Concern | 1.x | 2.x |
+|---|---|---|
+| Paths | `/session`, `/event`, … | everything under `/api/`; OpenAPI at `/openapi.json` |
+| Auth | optional | always: HTTP Basic, user `opencode`, password from `OPENCODE_PASSWORD` (the companion sets a fresh one per launch); `?auth_token=<base64 user:pass>` for the SSE feed |
+| Directory | `?directory=` | `?location[directory]=`; session create takes it in the body as `location: {directory}` and silently uses the server's cwd otherwise |
+| Envelope | bare JSON | mostly `{location, data}`; `/api/project`, `/api/info`, `/api/location` are bare |
+| Prompt | `prompt_async` with `parts`, `model`, `agent` | `POST /api/session/{id}/prompt` with `text` + `files[{uri}]` (data: URIs work); model and agent are session state (`POST …/model`, `…/agent`) |
+| Events | per-instance `/event`, `message.part.*` | one global `/api/event`; `session.step.*`, `session.text|reasoning.started/delta/ended`, `session.tool.*`; a turn ends with `session.execution.succeeded|failed|interrupted` (no `session.idle`); heartbeat is an SSE comment, so the adapter makes its own |
+| Messages | info + parts | one record per message, `content[]` on assistants; paged (max 200) |
+| Per-turn diffs | stored on user messages | computed: `GET /api/session/{id}/diff?from=<user message id>` |
+| Permissions | `reply`; rules `{permission, pattern, action}` | `POST /api/session/{sid}/permission/{id}/reply {decision}`; rules `{action, resource, effect}`; `bash` is `shell` |
+| Questions | `/question` | forms (`/api/form`); the question tool's fields are `q0`, `q1`… |
+| MCP add/remove | `POST /mcp` | `PUT /api/experimental/mcp/{name}` (runtime only) |
+| Sharing | share/unshare | removed (also gone in 1.19.1) |
+| Todos | `todo.updated` | the `todowrite` tool's input, behind `experimental.todo` |
+
+The config file keeps working: 2.x normalizes 1.x-shaped `opencode.json`
+(`permission`, `mcp`, `provider`) on read.
+
 ## Gotchas for the Mac companion
 
 - Start `opencode serve` with `OPENCODE_SERVER_PASSWORD` set (it warns

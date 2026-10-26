@@ -9,14 +9,56 @@ import OSLog
 /// doesn't. Verified against 1.18.10; docs/protocol-v1.md records the
 /// contract and the skew already observed.
 ///
+/// OpenCode 2 replaced the whole HTTP API (everything under `/api/`, a new
+/// event vocabulary, messages without parts). It is served by the same
+/// type: `api` says which generation the server speaks, each operation
+/// branches on it, and the 2.x path (OpenCodeAdapterV2.swift) translates
+/// what it reads back into the 1.x shapes everything downstream already
+/// consumes. Callers never branch.
+///
 /// JSON is handled as dictionaries rather than Codable models on purpose:
 /// the adapter's job is tolerating shape drift, and a typed decode that
 /// throws on a renamed field is the opposite of that.
 struct OpenCodeAdapter {
     let port: Int
-    private let logger = Logger(subsystem: "com.timwilliams.opencodego", category: "adapter")
+    /// Which generation of OpenCode's HTTP API the server speaks.
+    var api: API = .v1
+    /// The server password, sent as HTTP Basic auth (username `opencode`).
+    /// OpenCode 2 always requires one; 1.x only when configured.
+    var password: String?
+    let logger = Logger(subsystem: "com.timwilliams.opencodego", category: "adapter")
 
-    private var base: String { "http://127.0.0.1:\(port)" }
+    enum API: String {
+        /// OpenCode 1.x: `/session`, `/event`, `/global/health`.
+        case v1
+        /// OpenCode 2.x: everything under `/api/`, verified on 2.1.4.
+        case v2
+    }
+
+    var base: String { "http://127.0.0.1:\(port)" }
+
+    /// Which API a freshly started server speaks, and its version. Nil
+    /// while it isn't answering yet. 2.x is asked first because its
+    /// web app answers every unknown path, `/global/health` included,
+    /// with a 200 and an HTML page.
+    static func probe(port: Int, password: String?) async -> (api: API, version: String)? {
+        let v2 = OpenCodeAdapter(port: port, api: .v2, password: password)
+        if let info = try? await v2.get("/api/info", timeout: healthTimeout) as? [String: Any],
+           let version = info["version"] as? String {
+            return (.v2, version)
+        }
+        let v1 = OpenCodeAdapter(port: port, api: .v1, password: password)
+        if let health = try? await v1.health(), health.healthy {
+            return (.v1, health.version)
+        }
+        return nil
+    }
+
+    /// `Authorization` for the server password, nil without one.
+    var authorization: String? {
+        guard let password, !password.isEmpty else { return nil }
+        return "Basic " + Data("opencode:\(password)".utf8).base64EncodedString()
+    }
 
     // MARK: - Plumbing
 
@@ -43,32 +85,42 @@ struct OpenCodeAdapter {
     /// seconds for that on the LAN, so a slow answer is as good as none.
     static let healthTimeout: TimeInterval = 5
 
-    private func get(
+    func get(
         _ path: String, directory: String? = nil, timeout: TimeInterval = Self.requestTimeout
     ) async throws -> Any {
         try await request(path, method: "GET", directory: directory, body: nil, timeout: timeout)
     }
 
     @discardableResult
-    private func post(
+    func post(
         _ path: String, directory: String? = nil, body: [String: Any]? = [:],
         timeout: TimeInterval = Self.requestTimeout
     ) async throws -> Any {
         try await request(path, method: "POST", directory: directory, body: body, timeout: timeout)
     }
 
-    private func request(
+    /// The query parameter that names the working directory: 1.x took
+    /// `directory`, 2.x takes `location[directory]`.
+    var directoryParameter: String { api == .v2 ? "location[directory]" : "directory" }
+
+    @discardableResult
+    func request(
         _ path: String, method: String, directory: String?, body: [String: Any]?,
         timeout: TimeInterval = Self.requestTimeout
     ) async throws -> Any {
         var components = URLComponents(string: base + path)!
         if let directory {
-            components.queryItems = (components.queryItems ?? []) + [
-                URLQueryItem(name: "directory", value: directory),
+            // Encoded by hand: URLComponents leaves the brackets of
+            // `location[directory]` bare, and a path can hold `&` or `+`.
+            components.percentEncodedQueryItems = (components.percentEncodedQueryItems ?? []) + [
+                URLQueryItem(
+                    name: Self.queryEncoded(directoryParameter), value: Self.queryEncoded(directory)
+                ),
             ]
         }
         var req = URLRequest(url: components.url!, timeoutInterval: timeout)
         req.httpMethod = method
+        if let authorization { req.setValue(authorization, forHTTPHeaderField: "Authorization") }
         if let body {
             req.httpBody = try JSONSerialization.data(withJSONObject: body)
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -84,6 +136,14 @@ struct OpenCodeAdapter {
         // and an empty body is success, not JSON to choke on.
         guard !data.isEmpty else { return NSNull() }
         return try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+    }
+
+    /// A query name or value, percent-encoded strictly enough for any
+    /// server to read back exactly.
+    static func queryEncoded(_ text: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+?#[]")
+        return text.addingPercentEncoding(withAllowedCharacters: allowed) ?? text
     }
 
     enum AdapterError: LocalizedError {
@@ -149,6 +209,7 @@ struct OpenCodeAdapter {
     // MARK: - v1: status / capabilities
 
     func health() async throws -> (healthy: Bool, version: String) {
+        if api == .v2 { return try await v2Health() }
         let json = try await get("/global/health", timeout: Self.healthTimeout)
             as? [String: Any] ?? [:]
         return (json["healthy"] as? Bool ?? false, json["version"] as? String ?? "unknown")
@@ -172,6 +233,7 @@ struct OpenCodeAdapter {
     /// first provider default in *sorted* order: dictionary order once
     /// picked whatever it liked, including an image model.
     func defaultModel() async throws -> (providerID: String, modelID: String)? {
+        if api == .v2 { return try await v2DefaultModel() }
         if let config = try? await get("/config") as? [String: Any],
            let model = config["model"] as? String {
             let parts = model.split(separator: "/", maxSplits: 1)
@@ -195,6 +257,7 @@ struct OpenCodeAdapter {
     /// offering a coding agent that can only talk. (This is also what made
     /// the old provider-default fallback pick an image model.)
     func models() async throws -> (models: [AgentModel], defaultID: String?) {
+        if api == .v2 { return try await v2Models() }
         let json = try await get("/config/providers") as? [String: Any] ?? [:]
         let providers = json["providers"] as? [[String: Any]] ?? []
         var out: [AgentModel] = []
@@ -237,6 +300,7 @@ struct OpenCodeAdapter {
     /// The denominator for a client's context meter; callers cache, since
     /// the catalog doesn't change under a running turn.
     func contextLimits() async throws -> [String: Int] {
+        if api == .v2 { return try await v2ContextLimits() }
         let json = try await get("/config/providers") as? [String: Any] ?? [:]
         var out: [String: Int] = [:]
         for provider in json["providers"] as? [[String: Any]] ?? [] {
@@ -292,6 +356,12 @@ struct OpenCodeAdapter {
         _ builtin: Builtin, sessionID: String, directory: String,
         providerID: String?, modelID: String?
     ) async throws -> String? {
+        if api == .v2 {
+            return try await v2RunBuiltin(
+                builtin, sessionID: sessionID, directory: directory,
+                providerID: providerID, modelID: modelID
+            )
+        }
         switch builtin {
         case .summarize:
             guard let providerID, let modelID else {
@@ -344,6 +414,7 @@ struct OpenCodeAdapter {
     /// the command runs, so shipping them to the phone would be several KB
     /// of prompt text the phone can't use and mustn't interpret.
     func commands() async throws -> [AgentCommand] {
+        if api == .v2 { return try await v2Commands() }
         let list = try await get("/command") as? [[String: Any]] ?? []
         var out = list.compactMap { item -> AgentCommand? in
             guard let name = item["name"] as? String else { return nil }
@@ -373,6 +444,12 @@ struct OpenCodeAdapter {
         providerID: String?, modelID: String?, attachments: [Attachment] = [],
         agent: String? = nil
     ) async throws {
+        if api == .v2 {
+            return try await v2RunCommand(
+                sessionID: sessionID, directory: directory, command: command, arguments: arguments,
+                providerID: providerID, modelID: modelID, attachments: attachments, agent: agent
+            )
+        }
         // OpenCode answers an unregistered command name with a bare 500
         // ("UnknownError", no detail — verified live). Checking the list
         // first turns that into a sentence naming the actual problem.
@@ -399,6 +476,7 @@ struct OpenCodeAdapter {
     /// subagents are dispatched by the model, and the hidden ones
     /// (compaction, title, summary) are internal machinery.
     func agents() async throws -> [AgentInfo] {
+        if api == .v2 { return try await v2Agents() }
         let list = try await get("/agent") as? [[String: Any]] ?? []
         return list.compactMap { item in
             guard let name = item["name"] as? String,
@@ -420,6 +498,7 @@ struct OpenCodeAdapter {
     /// at its startup, plus anything added live), with OpenCode's status
     /// word and, for a failure, why.
     func mcpStatus(directory: String) async throws -> [String: (status: String, error: String?)] {
+        if api == .v2 { return try await v2McpStatus(directory: directory) }
         let status = try await get("/mcp", directory: directory) as? [String: Any] ?? [:]
         var result: [String: (status: String, error: String?)] = [:]
         for (name, value) in status {
@@ -434,10 +513,9 @@ struct OpenCodeAdapter {
     /// session has no rule and the config decides. A later rule for the
     /// same server wins, which is how OpenCode evaluates them.
     func mcpRules(sessionID: String, directory: String) async throws -> [String: Bool] {
-        let session = try await get("/session/\(sessionID)", directory: directory)
-            as? [String: Any] ?? [:]
         var result: [String: Bool] = [:]
-        for rule in session["permission"] as? [[String: Any]] ?? [] where Self.isMcpRule(rule) {
+        for rule in try await sessionRules(sessionID: sessionID, directory: directory)
+        where Self.isMcpRule(rule) {
             guard let permission = rule["permission"] as? String else { continue }
             result[String(permission.dropLast(2))] = rule["action"] as? String == "allow"
         }
@@ -490,6 +568,7 @@ struct OpenCodeAdapter {
     /// the file is the companion's to write, and other instances see the
     /// server at the next restart.
     func addMcp(_ server: McpServerConfig, directory: String) async throws -> (status: String, error: String?) {
+        if api == .v2 { return try await v2AddMcp(server, directory: directory) }
         let json = try await post(
             "/mcp", directory: directory, body: ["name": server.name, "config": server.block()],
             timeout: Self.requestTimeout * 2
@@ -501,6 +580,7 @@ struct OpenCodeAdapter {
     /// Close a server's client in the instance for `directory`; its
     /// tools leave the model's list at the next step.
     func disconnectMcp(_ name: String, directory: String) async throws {
+        if api == .v2 { return try await v2DisconnectMcp(name, directory: directory) }
         try await post("/mcp/\(name)/disconnect", directory: directory)
     }
 
@@ -511,13 +591,32 @@ struct OpenCodeAdapter {
         sessionID: String, directory: String,
         transform: ([[String: Any]]) -> [[String: Any]]
     ) async throws {
-        let session = try await get("/session/\(sessionID)", directory: directory)
-            as? [String: Any] ?? [:]
-        let existing = session["permission"] as? [[String: Any]] ?? []
+        let existing = try await sessionRules(sessionID: sessionID, directory: directory)
+        let rules = transform(existing)
+        if api == .v2 {
+            try await request(
+                "/api/session/\(sessionID)", method: "PATCH", directory: nil,
+                body: ["permissions": rules.map(Self.v2Rule(from:))]
+            )
+            return
+        }
         try await request(
             "/session/\(sessionID)", method: "PATCH", directory: directory,
-            body: ["permission": transform(existing)]
+            body: ["permission": rules]
         )
+    }
+
+    /// The session's own ruleset in 1.x shape (`{permission, pattern,
+    /// action}`), whichever generation stores it. 2.x names the same
+    /// three things `{action, resource, effect}`.
+    private func sessionRules(sessionID: String, directory: String) async throws -> [[String: Any]] {
+        if api == .v2 {
+            let session = try await v2Session(sessionID)
+            return (session["permissions"] as? [[String: Any]] ?? []).map(Self.v1Rule(from:))
+        }
+        let session = try await get("/session/\(sessionID)", directory: directory)
+            as? [String: Any] ?? [:]
+        return session["permission"] as? [[String: Any]] ?? []
     }
 
     /// Whitelist `patterns` for `permission` in this session, effective
@@ -537,6 +636,7 @@ struct OpenCodeAdapter {
     }
 
     func todos(sessionID: String, directory: String) async throws -> [TodoItem] {
+        if api == .v2 { return try await v2Todos(sessionID: sessionID, directory: directory) }
         let list = try await get("/session/\(sessionID)/todo", directory: directory)
             as? [[String: Any]] ?? []
         return Self.todos(from: list)
@@ -560,6 +660,7 @@ struct OpenCodeAdapter {
     /// is against the default branch, which is what a reviewer would see
     /// in a pull request.
     func workingChanges(directory: String, mode: String) async throws -> WorkingChanges {
+        if api == .v2 { return try await v2WorkingChanges(directory: directory, mode: mode) }
         let vcs = try await get("/vcs", directory: directory) as? [String: Any] ?? [:]
         let list = try await get(
             "/vcs/diff?mode=\(mode)", directory: directory
@@ -585,12 +686,22 @@ struct OpenCodeAdapter {
     // MARK: - v1: session management
 
     func deleteSession(_ sessionID: String, directory: String) async throws {
+        if api == .v2 {
+            try await request("/api/session/\(sessionID)", method: "DELETE", directory: nil, body: nil)
+            return
+        }
         try await request(
             "/session/\(sessionID)", method: "DELETE", directory: directory, body: nil
         )
     }
 
     func renameSession(_ sessionID: String, directory: String, title: String) async throws {
+        if api == .v2 {
+            try await request(
+                "/api/session/\(sessionID)", method: "PATCH", directory: nil, body: ["title": title]
+            )
+            return
+        }
         try await request(
             "/session/\(sessionID)", method: "PATCH", directory: directory,
             body: ["title": title]
@@ -600,6 +711,7 @@ struct OpenCodeAdapter {
     // MARK: - v1: projects / sessions
 
     func projects() async throws -> [Project] {
+        if api == .v2 { return try await v2Projects() }
         let list = try await get("/project") as? [[String: Any]] ?? []
         return list.compactMap { item in
             guard let id = item["id"] as? String, id != "global",
@@ -618,6 +730,7 @@ struct OpenCodeAdapter {
     }
 
     func sessions(limit: Int = 20, search: String? = nil) async throws -> [Session] {
+        if api == .v2 { return try await v2Sessions(limit: limit, search: search) }
         var path = "/experimental/session?limit=\(limit)"
         if let search, !search.isEmpty,
            let encoded = search.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
@@ -639,6 +752,7 @@ struct OpenCodeAdapter {
     // MARK: - v1: prompt
 
     func createSession(directory: String) async throws -> String {
+        if api == .v2 { return try await v2CreateSession(directory: directory) }
         let json = try await post("/session", directory: directory) as? [String: Any] ?? [:]
         guard let id = json["id"] as? String else {
             throw AdapterError.http(path: "/session", status: 0, body: "no id in response")
@@ -657,6 +771,12 @@ struct OpenCodeAdapter {
         providerID: String, modelID: String, attachments: [Attachment] = [],
         agent: String? = nil
     ) async throws {
+        if api == .v2 {
+            return try await v2Prompt(
+                sessionID: sessionID, directory: directory, text: text,
+                providerID: providerID, modelID: modelID, attachments: attachments, agent: agent
+            )
+        }
         let parts: [[String: Any]] = [["type": "text", "text": text]]
             + (try Self.parts(for: attachments))
         var body: [String: Any] = [
@@ -702,6 +822,10 @@ struct OpenCodeAdapter {
     }
 
     func abort(sessionID: String, directory: String) async throws {
+        if api == .v2 {
+            try await post("/api/session/\(sessionID)/interrupt")
+            return
+        }
         try await post("/session/\(sessionID)/abort", directory: directory)
     }
 
@@ -710,6 +834,7 @@ struct OpenCodeAdapter {
     /// Pending asks, straight from the poll endpoint — the recovery path
     /// when an event was missed (or the phone just woke from a push).
     func pendingPermissions(directory: String) async throws -> [PermissionRequest] {
+        if api == .v2 { return try await v2PendingPermissions(directory: directory) }
         let list = try await get("/permission", directory: directory) as? [[String: Any]] ?? []
         return list.compactMap(Self.permission(from:))
     }
@@ -728,9 +853,14 @@ struct OpenCodeAdapter {
         var reply = reply
         var persisted = false
         var covered: [PermissionRequest] = []
+        // 2.x answers an ask under its session's path, so the session has
+        // to be known even without a grant.
+        var pending: [PermissionRequest] = []
+        if api == .v2 || (grant != nil && reply != "reject") {
+            pending = try await pendingPermissions(directory: directory)
+        }
+        let ask = pending.first { $0.id == id }
         if let grant, reply != "reject", !grant.patterns.isEmpty {
-            let pending = try await pendingPermissions(directory: directory)
-            let ask = pending.first { $0.id == id }
             if let sessionID = ask?.sessionID {
                 try await allow(
                     grant.patterns, for: grant.permission, sessionID: sessionID, directory: directory
@@ -755,6 +885,24 @@ struct OpenCodeAdapter {
                     && Self.isCovered(other, by: grant.patterns)
             }
         }
+        if api == .v2 {
+            guard let sessionID = ask?.sessionID else {
+                // Already answered elsewhere (the TUI, another device), or
+                // gone with its turn: nothing left to say yes or no to.
+                throw AdapterError.http(
+                    path: "/permission", status: 404, body: "That request is no longer pending."
+                )
+            }
+            var body: [String: Any] = ["decision": reply]
+            if let message, !message.isEmpty { body["message"] = message }
+            try await post("/api/session/\(sessionID)/permission/\(id)/reply", body: body)
+            for other in covered {
+                try? await post(
+                    "/api/session/\(sessionID)/permission/\(other.id)/reply", body: ["decision": "once"]
+                )
+            }
+            return persisted
+        }
         var body: [String: Any] = ["reply": reply]
         // A rejection with direction reaches the agent as guidance rather
         // than a bare no.
@@ -778,11 +926,13 @@ struct OpenCodeAdapter {
     // MARK: - v1: question
 
     func pendingQuestions(directory: String) async throws -> [QuestionRequest] {
+        if api == .v2 { return try await v2PendingQuestions(directory: directory) }
         let list = try await get("/question", directory: directory) as? [[String: Any]] ?? []
         return list.compactMap(Self.question(from:))
     }
 
     func replyQuestion(id: String, directory: String, answers: [[String]]) async throws {
+        if api == .v2 { return try await v2ReplyQuestion(id: id, directory: directory, answers: answers) }
         try await post(
             "/question/\(id)/reply", directory: directory, body: ["answers": answers]
         )
@@ -795,7 +945,8 @@ struct OpenCodeAdapter {
     /// long thread it is megabytes: a cold load fetches it once and
     /// derives the three from the same copy.
     func messages(sessionID: String, directory: String) async throws -> [[String: Any]] {
-        try await get(
+        if api == .v2 { return try await v2Messages(sessionID: sessionID, directory: directory) }
+        return try await get(
             "/session/\(sessionID)/message", directory: directory
         ) as? [[String: Any]] ?? []
     }
@@ -856,10 +1007,10 @@ struct OpenCodeAdapter {
         usage.contextLimit = try? await contextLimit(for: info)
         // Cost is the one number that is meant to accumulate; the session
         // record carries the running total.
-        let session = try? await get(
-            "/session/\(sessionID)", directory: directory
-        ) as? [String: Any]
-        usage.cost = session?["cost"] as? Double
+        let session = api == .v2
+            ? try? await v2Session(sessionID)
+            : try? await get("/session/\(sessionID)", directory: directory) as? [String: Any]
+        usage.cost = (session?["cost"] as? NSNumber)?.doubleValue
         return usage
     }
 
@@ -893,11 +1044,28 @@ struct OpenCodeAdapter {
     func events(
         directory: String, onConnected: (@Sendable () -> Void)? = nil
     ) async -> AsyncThrowingStream<[String: Any], Error> {
-        var components = URLComponents(string: base + "/event")!
-        components.queryItems = [URLQueryItem(name: "directory", value: directory)]
-        let payloads = await EventStreamHub.shared.subscribe(
-            components.url!, onConnected: onConnected
-        )
+        let url: URL
+        if api == .v2 {
+            // One feed for every location; the turn loop filters by
+            // session. The hub opens it as a plain GET, so the credential
+            // rides as the `auth_token` query parameter 2.x accepts.
+            var components = URLComponents(string: base + "/api/event")!
+            if let password, !password.isEmpty {
+                components.percentEncodedQueryItems = [URLQueryItem(
+                    name: "auth_token",
+                    value: Self.queryEncoded(Data("opencode:\(password)".utf8).base64EncodedString())
+                )]
+            }
+            url = components.url!
+        } else {
+            var components = URLComponents(string: base + "/event")!
+            components.queryItems = [URLQueryItem(name: "directory", value: directory)]
+            url = components.url!
+        }
+        let payloads = await EventStreamHub.shared.subscribe(url, onConnected: onConnected)
+        // 2.x speaks a different event vocabulary; each subscriber gets its
+        // own translator, since translating needs per-stream memory.
+        let translator = api == .v2 ? OpenCodeEventsV2() : nil
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -906,6 +1074,12 @@ struct OpenCodeAdapter {
                               let event = try? JSONSerialization.jsonObject(with: data)
                                   as? [String: Any]
                         else { continue }
+                        if let translator {
+                            for translated in translator.translate(event) {
+                                continuation.yield(translated)
+                            }
+                            continue
+                        }
                         continuation.yield(event)
                     }
                     continuation.finish()
@@ -913,7 +1087,22 @@ struct OpenCodeAdapter {
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination = { _ in task.cancel() }
+            // 1.x heartbeats with a real event every ten seconds, and the
+            // turn loop leans on it: an invocation that failed (an unknown
+            // command, a rejected prompt) is only noticed when the next
+            // event arrives. 2.x heartbeats with an SSE comment the hub
+            // never passes on, so the same beat is made here.
+            let heartbeat: Task<Void, Never>? = translator == nil ? nil : Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(10))
+                    guard !Task.isCancelled else { return }
+                    continuation.yield(["type": "server.heartbeat", "properties": [String: Any]()])
+                }
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
+                heartbeat?.cancel()
+            }
         }
     }
 
