@@ -60,6 +60,13 @@ final class OpenCodeProcess: ObservableObject {
     /// old child exiting late reads as the new one crashing: it dropped the
     /// new child's handle (orphaning it) and launched a second server.
     private var generation = 0
+    /// The generation whose child has printed its listening line. A launch
+    /// still missing from here when the startup timeout fires is stuck.
+    private var announced = 0
+    /// How long a child gets to print its listening line. A first run can
+    /// install plugins before it serves, so this is generous; the point is
+    /// only that "Starting OpenCode…" can't last forever.
+    private static let startupTimeout: Duration = .seconds(60)
 
     /// Where the homebrew, manual, and bun installs land. `which` isn't
     /// available to a GUI app (no login-shell PATH), so known locations
@@ -217,7 +224,9 @@ final class OpenCodeProcess: ObservableObject {
         p.executableURL = URL(fileURLWithPath: binary)
         // --port 0: the OS assigns a free port, printed on stdout. No fixed
         // port means no collision with the user's own `opencode serve`.
-        p.arguments = ["serve", "--port", "0"]
+        // --hostname pins it to loopback even when the user's config asks
+        // for another address (or mDNS, which means 0.0.0.0 on 1.x).
+        p.arguments = ["serve", "--hostname", "127.0.0.1", "--port", "0"]
         var env = ProcessInfo.processInfo.environment
         // The CLI shells out to git and friends; a GUI app's PATH lacks
         // their usual homes.
@@ -243,8 +252,13 @@ final class OpenCodeProcess: ObservableObject {
             }
             guard let text = String(data: data, encoding: .utf8) else { return }
             buffer += text
-            // "opencode server listening on http://127.0.0.1:PORT"
-            if let range = buffer.range(of: #"listening on http://127\.0\.0\.1:(\d+)"#, options: .regularExpression) {
+            // What it says before it serves is what explains a stuck start.
+            let said = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !said.isEmpty { self?.logger.debug("opencode: \(said, privacy: .public)") }
+            // "opencode server listening on http://127.0.0.1:PORT" (1.x),
+            // "server listening on ..." (2.x). Any host is accepted: the
+            // port is what matters, and the health check proves it answers.
+            if let range = buffer.range(of: #"listening on https?://\S+:\d+"#, options: .regularExpression) {
                 let port = Int(buffer[range].split(separator: ":").last ?? "") ?? 0
                 buffer = ""
                 // Keep reading for the life of the child. A pipe nobody
@@ -276,7 +290,24 @@ final class OpenCodeProcess: ObservableObject {
             logger.notice("launched \(binary, privacy: .public)")
         } catch {
             state = .failed("Couldn't start OpenCode: \(error.localizedDescription)")
+            return
         }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.startupTimeout)
+            self?.startupTimedOut(launched: launched)
+        }
+    }
+
+    /// The child is alive but never said where it's listening: hung in its
+    /// own startup, or printing something we don't recognize. Stop it and
+    /// say so, rather than restarting into the same wall; Restart OpenCode
+    /// is the way back once the cause is fixed.
+    private func startupTimedOut(launched: Int) {
+        guard launched == generation, announced != launched, state == .starting,
+              process?.isRunning == true else { return }
+        logger.error("opencode printed no listening address within \(Self.startupTimeout); stopping it")
+        stop()
+        state = .failed("OpenCode didn't finish starting. Run \"opencode serve\" in Terminal to see why.")
     }
 
     /// The port is known; prove the server actually answers before calling
@@ -284,6 +315,7 @@ final class OpenCodeProcess: ObservableObject {
     /// check is cheap and carries the version the capability handshake
     /// wants anyway.
     private func confirm(port: Int, launched: Int) {
+        if launched == generation { announced = launched }
         Task { @MainActor in
             for attempt in 0 ..< 20 {
                 guard launched == generation else { return }
