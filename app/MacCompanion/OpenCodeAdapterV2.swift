@@ -507,8 +507,14 @@ extension OpenCodeAdapter {
         var out: [[String: Any]] = []
         var cursor: String?
         repeat {
-            var path = "/api/session/\(sessionID)/message?limit=200&order=asc"
-            if let cursor { path += "&cursor=\(Self.queryEncoded(cursor))" }
+            // The cursor carries its own order, and 2.x rejects a request
+            // that names both, so only the first page asks for ascending.
+            var path = "/api/session/\(sessionID)/message?limit=200"
+            if let cursor {
+                path += "&cursor=\(Self.queryEncoded(cursor))"
+            } else {
+                path += "&order=asc"
+            }
             let json = try await get(path) as? [String: Any] ?? [:]
             let page = json["data"] as? [[String: Any]] ?? []
             out += page
