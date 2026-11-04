@@ -264,6 +264,16 @@ private final class Connection {
             serveSchedule(request)
             return
         }
+        // Restart is the way back from a crashed or wedged OpenCode, so it
+        // can't sit behind the "is OpenCode up?" check below. The answer is
+        // empty; the client re-asks once the server has had a moment.
+        if request.kind == "opencode.restart" {
+            answer {
+                OpenCodeRestart.now()
+                return []
+            }
+            return
+        }
         guard let adapter = adapter() else {
             var e = Wire.Event(kind: "failed")
             e.text = "OpenCode is starting on your Mac — try again in a moment."
@@ -533,8 +543,7 @@ private final class Connection {
                 // The user's explicit choice, turns or no turns, exactly
                 // like the pane's own button. The list that follows is
                 // read from the restarted server once it answers.
-                ModelSourceStore.shared.restartNow()
-                registry.noteRestarted()
+                OpenCodeRestart.now()
                 var e = Wire.Event(kind: "mcp")
                 e.mcp = []
                 e.configPath = registry.configPath

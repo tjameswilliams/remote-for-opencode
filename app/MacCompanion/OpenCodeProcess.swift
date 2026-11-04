@@ -54,6 +54,12 @@ final class OpenCodeProcess: ObservableObject {
     private var process: Process?
     private var restartAttempts = 0
     private var stopping = false
+    /// Counts launches. Every callback a child sets up (its port, its
+    /// health check, its exit) carries the number it was launched under
+    /// and is ignored once a newer launch exists. Without this, a restart's
+    /// old child exiting late reads as the new one crashing: it dropped the
+    /// new child's handle (orphaning it) and launched a second server.
+    private var generation = 0
 
     /// Where the homebrew, manual, and bun installs land. `which` isn't
     /// available to a GUI app (no login-shell PATH), so known locations
@@ -186,8 +192,11 @@ final class OpenCodeProcess: ObservableObject {
     }
 
     /// A deliberate stop and fresh launch: how a config change reaches
-    /// OpenCode, which reads its global config only at startup. The
-    /// restart counter resets so this never reads as a crash.
+    /// OpenCode, which reads its global config only at startup, and the
+    /// user's way out of a wedged or crash-looping server. Works from any
+    /// state, "keeps crashing" and "isn't installed" included (the binary
+    /// is searched for again). The restart counter resets so this never
+    /// reads as a crash.
     func restart() {
         stop()
         restartAttempts = 0
@@ -201,6 +210,8 @@ final class OpenCodeProcess: ObservableObject {
         }
         state = .starting
         stopping = false
+        generation += 1
+        let launched = generation
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binary)
@@ -252,11 +263,11 @@ final class OpenCodeProcess: ObservableObject {
                     else { return }
                     self?.logger.debug("opencode: \(text, privacy: .public)")
                 }
-                Task { @MainActor [weak self] in self?.confirm(port: port) }
+                Task { @MainActor [weak self] in self?.confirm(port: port, launched: launched) }
             }
         }
         p.terminationHandler = { [weak self] _ in
-            Task { @MainActor [weak self] in self?.exited() }
+            Task { @MainActor [weak self] in self?.exited(launched: launched) }
         }
         do {
             try p.run()
@@ -272,9 +283,10 @@ final class OpenCodeProcess: ObservableObject {
     /// it running, and learn which API generation it speaks. The health
     /// check is cheap and carries the version the capability handshake
     /// wants anyway.
-    private func confirm(port: Int) {
+    private func confirm(port: Int, launched: Int) {
         Task { @MainActor in
             for attempt in 0 ..< 20 {
+                guard launched == generation else { return }
                 if let probe = await OpenCodeAdapter.probe(port: port, password: password) {
                     api = probe.api
                     state = .running(port: port, version: probe.version)
@@ -284,12 +296,14 @@ final class OpenCodeProcess: ObservableObject {
                 }
                 try? await Task.sleep(for: .milliseconds(250 * (attempt + 1)))
             }
+            guard launched == generation else { return }
             state = .failed("OpenCode started but never became healthy.")
             process?.terminate()
         }
     }
 
-    private func exited() {
+    private func exited(launched: Int) {
+        guard launched == generation else { return }
         process = nil
         guard !stopping else { return }
         restartAttempts += 1
@@ -302,8 +316,40 @@ final class OpenCodeProcess: ObservableObject {
         state = .starting
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(delay))
-            guard !stopping else { return }
+            guard !stopping, launched == generation else { return }
             launch()
         }
+    }
+}
+
+/// The user's explicit "Restart OpenCode", from the menu bar, the
+/// workspace, or a paired device. Running turns stop with it; the callers
+/// warn about that first. Goes through Model Sources and the MCP registry so
+/// their "restart to apply" offers clear too: this restart applies them.
+@MainActor
+enum OpenCodeRestart {
+    static func now() {
+        ModelSourceStore.shared.restartNow()
+        McpRegistry.shared.noteRestarted()
+    }
+
+    /// The Mac's own confirmation, asked only when there is something to
+    /// lose. Returns once the user has chosen; true means restarted.
+    @discardableResult
+    static func confirmAndRestart() -> Bool {
+        let running = LiveTurns.shared.activeCount
+        if running > 0 {
+            let alert = NSAlert()
+            alert.messageText = "Restart OpenCode?"
+            alert.informativeText = running == 1
+                ? "A turn is running. Restarting stops it."
+                : "\(running) turns are running. Restarting stops them."
+            alert.addButton(withTitle: "Restart")
+            alert.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        }
+        now()
+        return true
     }
 }

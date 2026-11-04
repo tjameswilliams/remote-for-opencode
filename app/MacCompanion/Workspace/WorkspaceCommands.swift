@@ -54,6 +54,9 @@ struct WorkspaceCommands: Commands {
             // device) only show up when the lists are re-asked for.
             Button("Refresh Sessions") { WorkspaceCommand.post(WorkspaceCommand.refresh) }
                 .keyboardShortcut("r", modifiers: .command)
+            // In-process, so it skips the notification hop: the restart
+            // belongs to the app, not to whichever workspace is in front.
+            Button("Restart OpenCode") { OpenCodeRestart.confirmAndRestart() }
             Divider()
             Button("Toggle Inspector") { WorkspaceCommand.post(WorkspaceCommand.toggleInspector) }
                 .keyboardShortcut("0", modifiers: [.command, .option])

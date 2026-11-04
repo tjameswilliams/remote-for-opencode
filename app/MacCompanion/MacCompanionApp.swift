@@ -171,8 +171,15 @@ struct StatusMenu: View {
                     NSApp.activate(ignoringOtherApps: true)
                     modelSources.reviewRequested = true
                 }
-            } else if modelSources.restartNeeded {
-                Button("Restart OpenCode to Apply Changes") { modelSources.restartNow() }
+            }
+            // Always offered: a config change waiting to apply, a crash
+            // loop, a server that stopped answering. Asks first only when
+            // a running turn would be cut off.
+            Button(
+                modelSources.restartNeeded && modelSources.pending.isEmpty
+                    ? "Restart OpenCode to Apply Changes" : "Restart OpenCode"
+            ) {
+                OpenCodeRestart.confirmAndRestart()
             }
             Divider()
             Button("Open Workspace") {

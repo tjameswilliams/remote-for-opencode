@@ -257,6 +257,17 @@ request. Its rows are already `FileDiff`-shaped
   bearer token) offers these operations as tools for the global chat. See
   docs/mcp-servers.md for what was verified live against 1.18.15.
 
+### `opencode.restart`: restart the Mac's OpenCode server
+
+- `{kind: "opencode.restart"}` stops the companion's `opencode serve` and
+  launches a fresh one; answers `done` only. Running turns stop with it, so
+  clients confirm first. Unlike every other OpenCode request it is served
+  while OpenCode is down (crashed, crash-looping, never healthy), since that
+  is when it is needed. Clients re-ask for what they show a few seconds
+  later. It also clears pending "restart to apply" offers from Model Sources
+  and MCP edits. Not capability-gated: `ready` carries no capabilities while
+  OpenCode is down, and an older companion answers a readable `failed`.
+
 ### `watch` — live view of a session this client didn't prompt
 - `{kind: "watch", session, project}` subscribes to the session's live
   events, translated exactly like a prompt turn's (same event loop on the

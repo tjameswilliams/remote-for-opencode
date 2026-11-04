@@ -29,6 +29,10 @@ struct HomeView: View {
     /// The phone can't browse the Mac's disk, so a new project source is a
     /// typed path, validated on the Mac.
     @State private var addingFolder = false
+    @State private var confirmingRestart = false
+    /// True from the tap until the Mac's lists come back from the fresh
+    /// server, so a second tap can't stack restarts.
+    @State private var restarting = false
     @State private var newFolderPath = ""
     /// The Mac's scheduled tasks; created here so the list survives
     /// pushing in and out of the schedules screen.
@@ -75,6 +79,13 @@ struct HomeView: View {
                             Image(systemName: "wrench.and.screwdriver")
                                 .accessibilityLabel("MCP servers")
                         }
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { confirmingRestart = true } label: {
+                            Image(systemName: "arrow.clockwise.circle")
+                                .accessibilityLabel("Restart OpenCode")
+                        }
+                        .disabled(restarting)
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -145,6 +156,14 @@ struct HomeView: View {
                 guard phase == .active else { return }
                 Task { await load() }
             }
+            .confirmationDialog(
+                "Restart OpenCode on your Mac?",
+                isPresented: $confirmingRestart, titleVisibility: .visible
+            ) {
+                Button("Restart", role: .destructive) { Task { await restartOpenCode() } }
+            } message: {
+                Text("Any turn that's running stops. Use this when OpenCode is stuck or crashing, or to pick up a config change.")
+            }
             .alert("Rename session", isPresented: Binding(
                 get: { renaming != nil },
                 set: { if !$0 { renaming = nil } }
@@ -194,6 +213,24 @@ struct HomeView: View {
         }
     }
 
+    /// The Mac answers as soon as the old server is told to stop; the new
+    /// one takes a few seconds to come up, so the lists are re-read after
+    /// a pause (the same wait the MCP screen's restart uses).
+    private func restartOpenCode() async {
+        restarting = true
+        defer { restarting = false }
+        error = nil
+        var failed = false
+        for await event in CompanionLink().run(Wire.Request(kind: "opencode.restart"))
+            where event.kind == "failed" {
+            error = event.text
+            failed = true
+        }
+        guard !failed else { return }
+        try? await Task.sleep(for: .seconds(4))
+        await load()
+    }
+
     /// The grouped list, built fresh from whatever the last round trips
     /// returned. Session matching happened on the Mac; project names are
     /// matched here, so a search covers both.
@@ -237,6 +274,14 @@ struct HomeView: View {
                     Label("MCP Servers", systemImage: "wrench.and.screwdriver")
                         .foregroundStyle(Color.ink)
                 }
+                Button { confirmingRestart = true } label: {
+                    Label(
+                        restarting ? "Restarting OpenCode…" : "Restart OpenCode",
+                        systemImage: "arrow.clockwise.circle"
+                    )
+                    .foregroundStyle(restarting ? Color.inkMuted : Color.ink)
+                }
+                .disabled(restarting)
             }
         }
     }
