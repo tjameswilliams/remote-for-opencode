@@ -43,7 +43,7 @@ struct WorkspaceSessionView: View {
     @ViewBuilder
     private var approvals: some View {
         if let permission = turn.permission {
-            PermissionCard(request: permission, queued: turn.queuedPermissions) { answer in
+            PermissionCard(request: permission, queued: turn.queuedPermissions, conversation: turn.session) { answer in
                 turn.answer(permission, with: answer)
             }
             .frame(maxWidth: 640)
@@ -51,7 +51,7 @@ struct WorkspaceSessionView: View {
             .transition(.move(edge: .bottom).combined(with: .opacity))
         }
         if let question = turn.question {
-            QuestionCard(request: question) { answers in
+            QuestionCard(request: question, conversation: turn.session) { answers in
                 turn.answer(question, answers: answers)
             }
             .frame(maxWidth: 640)
@@ -73,7 +73,8 @@ struct WorkspaceSessionView: View {
                 running: turn.running, activity: turn.activity,
                 turnStartedAt: turn.turnStartedAt,
                 todos: turn.todos, usage: turn.usage,
-                loading: turn.loading
+                loading: turn.loading,
+                project: turn.project
             )
             .frame(maxWidth: 640)
             .frame(maxWidth: .infinity)

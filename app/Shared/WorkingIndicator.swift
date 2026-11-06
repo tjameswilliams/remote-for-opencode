@@ -98,7 +98,11 @@ extension TurnPart {
             case "bash": return "Running a command"
             case "glob", "grep", "find": return "Searching the project"
             case "webfetch", "websearch": return "Searching the web"
-            case "task", "subagent": return "Running a subagent"
+            case "task", "subagent":
+                if let description = subagent?.description, !description.isEmpty {
+                    return "Subagent: \(description)"
+                }
+                return "Running a subagent"
             default: return tool.capitalized
             }
         case "text": return "Writing"

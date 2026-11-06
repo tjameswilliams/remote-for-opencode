@@ -184,6 +184,32 @@ struct WireTests {
         #expect(decodedReady.capabilities?.schedules == true)
     }
 
+    @Test("A subagent part round-trips, and one without details still reads as a subagent")
+    func subagentPart() throws {
+        var event = Wire.Event(kind: "part")
+        event.part = TurnPart(
+            type: "tool", id: "prt_1", tool: "task", status: "running",
+            subagent: SubagentRef(
+                session: "ses_child", agent: "explore",
+                description: "Scan the reducers", background: false
+            )
+        )
+        let decoded = try JSONDecoder().decode(
+            Wire.Event.self, from: JSONEncoder().encode(event)
+        )
+        #expect(decoded.part == event.part)
+        #expect(decoded.part?.subagent?.session == "ses_child")
+        #expect(decoded.part?.isSubagent == true)
+
+        // What an older companion sends: no `subagent` key at all.
+        let old = Data("""
+        {"kind":"part","part":{"type":"tool","id":"prt_2","tool":"task","status":"completed"}}
+        """.utf8)
+        let legacy = try JSONDecoder().decode(Wire.Event.self, from: old)
+        #expect(legacy.part?.subagent == nil)
+        #expect(legacy.part?.isSubagent == true)
+    }
+
     @Test("Unknown fields from a newer peer decode cleanly")
     func forwardCompatibility() throws {
         // The whole version-skew strategy rests on this: an older build

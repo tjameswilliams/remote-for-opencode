@@ -36,6 +36,7 @@ targets:
       - path: ../../app/Shared/AgentStore.swift
       - path: ../../app/Shared/TodoList.swift
       - path: ../../app/Shared/Transcript.swift
+      - path: ../../app/Shared/SubagentCard.swift
       - path: ../../app/Shared/UsageBadge.swift
       - path: ../../app/Shared/ReasoningBlock.swift
       - path: ../../app/Shared/PromptAttachments.swift

@@ -25,6 +25,10 @@ struct SessionView: View {
     /// What was typed before dictation started, so speech appends to it
     /// rather than eating it.
     @State private var typedBeforeDictation = ""
+    /// False while a subagent's conversation is pushed on top. That screen
+    /// raises the same asks itself (they're its own, or its subagents'),
+    /// and two sheets from one stack would fight over the presentation.
+    @State private var onTop = true
 
     init(project: String, session: String?, title: String) {
         self.title = title
@@ -45,7 +49,8 @@ struct SessionView: View {
                 running: turn.running, activity: turn.activity,
                 turnStartedAt: turn.turnStartedAt,
                 todos: turn.todos, usage: turn.usage,
-                loading: turn.loading
+                loading: turn.loading,
+                project: turn.project
             )
             if let matches = paletteMatches {
                 CommandPalette(commands: matches) { command in
@@ -82,16 +87,18 @@ struct SessionView: View {
         .sheet(isPresented: $showingChanges) {
             ChangesView(project: turn.project)
         }
-        .sheet(item: $turn.permission) { request in
-            PermissionSheet(request: request, queued: turn.queuedPermissions) { answer in
+        .sheet(item: onTop ? $turn.permission : .constant(nil)) { request in
+            PermissionSheet(request: request, queued: turn.queuedPermissions, conversation: turn.session) { answer in
                 turn.answer(request, with: answer)
             }
         }
-        .sheet(item: $turn.question) { request in
-            QuestionSheet(request: request) { answers in
+        .sheet(item: onTop ? $turn.question : .constant(nil)) { request in
+            QuestionSheet(request: request, conversation: turn.session) { answers in
                 turn.answer(request, answers: answers)
             }
         }
+        .onAppear { onTop = true }
+        .onDisappear { onTop = false }
         .onChange(of: attachments.error) {
             if let message = attachments.error { turn.error = message }
         }

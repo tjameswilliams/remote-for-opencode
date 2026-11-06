@@ -8,7 +8,13 @@ import SwiftUI
 /// reply endpoint wants.
 struct QuestionSheet: View {
     let request: QuestionRequest
+    /// The conversation on screen; see `PermissionSheet.conversation`.
+    var conversation: String? = nil
     let submit: ([[String]]) -> Void
+
+    private var asker: String {
+        isSubagentAsk(request.sessionID, in: conversation) ? "A subagent asks" : "The agent asks"
+    }
 
     /// Selected labels, per question index.
     @State private var selections: [Int: Set<String>] = [:]
@@ -54,7 +60,7 @@ struct QuestionSheet: View {
                     }
                 }
             }
-            .navigationTitle("The agent asks")
+            .navigationTitle(asker)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {

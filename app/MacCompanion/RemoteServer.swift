@@ -414,7 +414,9 @@ private final class Connection {
                 // One fetch for everything below: the message list is the
                 // whole thread, and a long one is megabytes.
                 let messages = try await adapter.messages(sessionID: session, directory: directory)
-                var parts = adapter.transcript(in: messages)
+                var parts = await adapter.resolvingSubagents(
+                    adapter.transcript(in: messages), sessionID: session, directory: directory
+                )
                 var events: [Wire.Event] = []
                 if request.newestFirst == true {
                     // Tail first, so the client can paint the screen the
@@ -1019,9 +1021,40 @@ enum TurnRunner {
         // the first three fall out of sight while OpenCode waits on them
         // forever. `justAsked` covers the ask whose event brought us here
         // in case the poll endpoint has not listed it yet.
+        // The session and its subagents' sessions, at any depth. A
+        // subagent runs in a child session of its own, and its asks wait
+        // on the user just like the parent's: OpenCode's own clients show
+        // a descendant's asks in the root session, and so does this turn.
+        // Learned from the turn's subagent parts and `session.created`, and
+        // for a session first seen through an ask (a subagent that started
+        // before this watch), by walking its parents once.
+        var family: Set<String> = [sessionID]
+        var outsiders: Set<String> = []
+        func belongs(_ id: String?) async -> Bool {
+            guard let id else { return true }
+            if family.contains(id) { return true }
+            if outsiders.contains(id) { return false }
+            var current = id
+            for _ in 0..<4 {
+                guard let parent = try? await adapter.parentID(of: current, directory: directory)
+                else { return false } // unknown: don't cache, ask again next time
+                guard let parent else { break }
+                if family.contains(parent) {
+                    family.insert(id)
+                    return true
+                }
+                current = parent
+            }
+            outsiders.insert(id)
+            return false
+        }
+
         func emitPermissionQueue(justAsked: PermissionRequest? = nil) async {
-            var pending = ((try? await adapter.pendingPermissions(directory: directory)) ?? [])
-                .filter { $0.sessionID == nil || $0.sessionID == sessionID }
+            var pending: [PermissionRequest] = []
+            for ask in (try? await adapter.pendingPermissions(directory: directory)) ?? []
+            where await belongs(ask.sessionID) {
+                pending.append(ask)
+            }
             if let justAsked, !pending.contains(where: { $0.id == justAsked.id }) {
                 pending.append(justAsked)
             }
@@ -1101,7 +1134,12 @@ enum TurnRunner {
             // instance-wide heartbeat carries no sessionID, so a turn whose
             // model has stopped answering goes quiet here even while the
             // stream stays alive, which is exactly the case to catch.
-            if properties["sessionID"] as? String == sessionID { onActivity?() }
+            // A subagent at work counts: the parent's turn is waiting on it,
+            // and a long one would otherwise read as a stalled model.
+            let eventSession = properties["sessionID"] as? String
+                ?? (properties["part"] as? [String: Any])?["sessionID"] as? String
+                ?? (properties["info"] as? [String: Any])?["sessionID"] as? String
+            if let eventSession, family.contains(eventSession) { onActivity?() }
             switch type {
             case "message.updated":
                 guard let info = properties["info"] as? [String: Any],
@@ -1132,9 +1170,12 @@ enum TurnRunner {
                 e.session = sessionID
                 emit(e)
             case "session.created", "session.updated":
-                guard let info = properties["info"] as? [String: Any],
-                      info["id"] as? String == sessionID
-                else { continue }
+                guard let info = properties["info"] as? [String: Any] else { continue }
+                if let id = info["id"] as? String, id != sessionID,
+                   let parentID = info["parentID"] as? String, family.contains(parentID) {
+                    family.insert(id)
+                }
+                guard info["id"] as? String == sessionID else { continue }
                 // The accumulated cost rides along on the next usage event.
                 if let cost = info["cost"] as? Double { sessionCost = cost }
                 // The title is relayed as it changes: OpenCode creates a
@@ -1179,6 +1220,7 @@ enum TurnRunner {
                 }
                 guard let mapped = OpenCodeAdapter.turnPart(from: part, role: "assistant")
                 else { continue }
+                if let child = mapped.subagent?.session { family.insert(child) }
                 var e = Wire.Event(kind: "part")
                 e.part = mapped
                 e.session = sessionID
@@ -1187,7 +1229,7 @@ enum TurnRunner {
             // `permission.updated`. Same skew note as the adapter.
             case "permission.asked", "permission.updated":
                 guard let mapped = OpenCodeAdapter.permission(from: properties),
-                      mapped.sessionID == nil || mapped.sessionID == sessionID
+                      await belongs(mapped.sessionID)
                 else { continue }
                 await emitPermissionQueue(justAsked: mapped)
             case "permission.replied":
@@ -1195,8 +1237,7 @@ enum TurnRunner {
                 // device): the next one in the queue goes up, and a bare
                 // permission event with no payload takes the card down
                 // when the queue is empty.
-                guard properties["sessionID"] as? String ?? sessionID == sessionID
-                else { continue }
+                guard await belongs(properties["sessionID"] as? String) else { continue }
                 await emitPermissionQueue()
             case "message.part.delta":
                 // `{sessionID, messageID, partID, field, delta}` —
@@ -1226,7 +1267,7 @@ enum TurnRunner {
                 emit(e)
             case "question.asked", "question.updated":
                 guard let mapped = OpenCodeAdapter.question(from: properties),
-                      mapped.sessionID == nil || mapped.sessionID == sessionID
+                      await belongs(mapped.sessionID)
                 else { continue }
                 var e = Wire.Event(kind: "question")
                 e.question = mapped
@@ -1234,8 +1275,7 @@ enum TurnRunner {
                 emit(e)
                 onWaiting?(true)
             case "question.replied":
-                guard properties["sessionID"] as? String ?? sessionID == sessionID
-                else { continue }
+                guard await belongs(properties["sessionID"] as? String) else { continue }
                 onWaiting?(false)
             case "session.error":
                 guard properties["sessionID"] as? String == sessionID else { continue }

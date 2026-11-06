@@ -628,7 +628,8 @@ extension OpenCodeAdapter {
                 id: item["id"] as? String ?? "\(messageID):tool:\(ordinal)",
                 name: item["name"] as? String,
                 status: state["status"] as? String,
-                input: state["input"] as? [String: Any]
+                input: state["input"] as? [String: Any],
+                metadata: state["metadata"] as? [String: Any]
             )
         default:
             return nil
@@ -638,13 +639,15 @@ extension OpenCodeAdapter {
     /// A tool call as a 1.x tool part. 2.x calls the file argument `path`
     /// where 1.x said `filePath`, and `streaming` is 1.x's `pending`.
     static func v1ToolPart(
-        id: String, name: String?, status: String?, input: [String: Any]?
+        id: String, name: String?, status: String?, input: [String: Any]?,
+        metadata: [String: Any]? = nil
     ) -> [String: Any] {
         var state: [String: Any] = ["status": status == "streaming" ? "pending" : (status ?? "pending")]
         if var input {
             if input["filePath"] == nil, let path = input["path"] { input["filePath"] = path }
             state["input"] = input
         }
+        if let metadata, !metadata.isEmpty { state["metadata"] = metadata }
         var part: [String: Any] = ["type": "tool", "id": id, "state": state]
         if let name { part["tool"] = name }
         return part

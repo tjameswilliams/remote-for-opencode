@@ -31,6 +31,7 @@ final class OpenCodeEventsV2: @unchecked Sendable {
     private var models: [String: (providerID: String, modelID: String)] = [:]
     private var toolNames: [String: String] = [:]
     private var toolInputs: [String: [String: Any]] = [:]
+    private var toolMetadata: [String: [String: Any]] = [:]
     private var compactions = 0
 
     func translate(_ event: [String: Any]) -> [[String: Any]] {
@@ -84,21 +85,33 @@ final class OpenCodeEventsV2: @unchecked Sendable {
                 "delta": data["delta"] as? String ?? "",
             ])]
 
-        case "session.tool.input.started", "session.tool.called",
+        case "session.tool.input.started", "session.tool.called", "session.tool.progress",
              "session.tool.success", "session.tool.failed":
             guard let id = data["id"] as? String else { return [] }
             if let name = data["name"] as? String { toolNames[id] = name }
             if let input = data["input"] as? [String: Any] { toolInputs[id] = input }
+            // Progress replaces a running tool's metadata; a subagent's
+            // child session id arrives this way, long before it ends.
+            if let metadata = data["metadata"] as? [String: Any] { toolMetadata[id] = metadata }
             let status: String
             switch type {
             case "session.tool.input.started": status = "pending"
-            case "session.tool.called": status = "running"
+            case "session.tool.called", "session.tool.progress": status = "running"
             case "session.tool.success": status = "completed"
             default: status = "error"
             }
             let name = toolNames[id]
+            // Only metadata the phone reads is worth a part snapshot; other
+            // tools' progress (shell output and the like) stays an
+            // activity signal for the stall watchdog.
+            if type == "session.tool.progress", !(name == "task" || name == "subagent") {
+                return [v1(type, data)]
+            }
             var out = [part(
-                OpenCodeAdapter.v1ToolPart(id: id, name: name, status: status, input: toolInputs[id]),
+                OpenCodeAdapter.v1ToolPart(
+                    id: id, name: name, status: status, input: toolInputs[id],
+                    metadata: toolMetadata[id]
+                ),
                 messageID: messageID
             )]
             // The plan arrives as the todo tool's input; 1.x had an event.
@@ -109,6 +122,7 @@ final class OpenCodeEventsV2: @unchecked Sendable {
             if type == "session.tool.success" || type == "session.tool.failed" {
                 toolNames[id] = nil
                 toolInputs[id] = nil
+                toolMetadata[id] = nil
             }
             return out
 
@@ -142,6 +156,9 @@ final class OpenCodeEventsV2: @unchecked Sendable {
         case "session.renamed", "session.created":
             var info: [String: Any] = ["id": sessionID as Any]
             if let title = data["title"] as? String { info["title"] = title }
+            // A subagent's session names its parent, which is how a turn
+            // learns which asks belong to it.
+            if let parentID = data["parentID"] as? String { info["parentID"] = parentID }
             return [v1(type == "session.created" ? "session.created" : "session.updated", ["info": info])]
 
         case "permission.asked":

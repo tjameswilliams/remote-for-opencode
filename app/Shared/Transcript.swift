@@ -22,6 +22,10 @@ struct Transcript: View {
     /// the bottom without animating there, so the reader opens on the
     /// newest turn and older ones fill in above, unseen.
     var loading: Bool = false
+    /// The conversation's project directory, which a subagent card needs
+    /// to open the subagent's own conversation. Nil leaves those cards
+    /// inert.
+    var project: String?
 
     private static let indicatorID = "working"
     @ScaledMetric(relativeTo: .body) private var betweenParts: CGFloat = 12
@@ -127,7 +131,7 @@ struct Transcript: View {
                     isActive: running && index == rows.count - 1
                 )
             } else {
-                PartRow(part: part)
+                PartRow(part: part, project: project)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -188,12 +192,15 @@ struct ChangeSummary: View {
 
 struct PartRow: View {
     let part: TurnPart
+    var project: String?
 
     var body: some View {
         switch part.type {
         case "text":
             MarkdownText(text: part.text ?? "")
                 .foregroundStyle(Color.ink)
+        case "tool" where part.isSubagent:
+            SubagentCard(part: part, project: project)
         case "tool":
             VStack(alignment: .leading, spacing: 6) {
                 Label {

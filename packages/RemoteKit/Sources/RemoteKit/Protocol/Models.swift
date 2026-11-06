@@ -514,11 +514,15 @@ public struct TurnPart: Codable, Equatable, Sendable {
     /// file can't flood the link. The full change still arrives as the
     /// turn's diff; this is the live preview.
     public var preview: String?
+    /// tool: set when the tool started a subagent (OpenCode's `task` tool,
+    /// called `subagent` on 2.x). Older peers ignore it.
+    public var subagent: SubagentRef?
 
     public init(
         type: String, id: String? = nil, text: String? = nil,
         tool: String? = nil, status: String? = nil,
-        file: String? = nil, preview: String? = nil
+        file: String? = nil, preview: String? = nil,
+        subagent: SubagentRef? = nil
     ) {
         self.type = type
         self.id = id
@@ -527,5 +531,37 @@ public struct TurnPart: Codable, Equatable, Sendable {
         self.status = status
         self.file = file
         self.preview = preview
+        self.subagent = subagent
+    }
+
+    /// True for a tool part that started a subagent, whether or not the
+    /// companion sent the `subagent` details.
+    public var isSubagent: Bool {
+        subagent != nil || (type == "tool" && (tool == "task" || tool == "subagent"))
+    }
+}
+
+/// The child session a subagent runs in. OpenCode gives every subagent its
+/// own session whose parent is the conversation that started it; `session`
+/// is that child's id, so a client can open its transcript.
+public struct SubagentRef: Codable, Equatable, Hashable, Sendable {
+    /// The child session's id. Nil until OpenCode reports it (on 2.x it
+    /// arrives with the tool's first progress event).
+    public var session: String?
+    /// Which agent runs it ("general", "explore", ...).
+    public var agent: String?
+    /// The model's short label for the task.
+    public var description: String?
+    /// The tool returned while the subagent keeps working in the background.
+    public var background: Bool?
+
+    public init(
+        session: String? = nil, agent: String? = nil,
+        description: String? = nil, background: Bool? = nil
+    ) {
+        self.session = session
+        self.agent = agent
+        self.description = description
+        self.background = background
     }
 }

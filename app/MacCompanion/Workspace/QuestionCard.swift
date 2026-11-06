@@ -8,7 +8,13 @@ import SwiftUI
 /// dismiss because there is no honest way to un-ask a blocking question.
 struct QuestionCard: View {
     let request: QuestionRequest
+    /// The conversation on screen; see `PermissionSheet.conversation`.
+    var conversation: String? = nil
     let submit: ([[String]]) -> Void
+
+    private var asker: String {
+        isSubagentAsk(request.sessionID, in: conversation) ? "A subagent asks" : "The agent asks"
+    }
 
     /// Selected labels, per question index.
     @State private var selections: [Int: Set<String>] = [:]
@@ -19,7 +25,7 @@ struct QuestionCard: View {
             HStack(spacing: 8) {
                 Image(systemName: "questionmark.bubble")
                     .foregroundStyle(Color.inkMuted)
-                Text("The agent asks")
+                Text(asker)
                     .font(.headline)
                     .foregroundStyle(Color.ink)
                 Spacer()

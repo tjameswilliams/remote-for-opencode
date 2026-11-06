@@ -65,12 +65,12 @@ struct InspectorPane: View {
             ScrollView {
                 VStack(spacing: 12) {
                     if let permission = turn.permission {
-                        PermissionCard(request: permission, queued: turn.queuedPermissions) { answer in
+                        PermissionCard(request: permission, queued: turn.queuedPermissions, conversation: turn.session) { answer in
                             turn.answer(permission, with: answer)
                         }
                     }
                     if let question = turn.question {
-                        QuestionCard(request: question) { answers in
+                        QuestionCard(request: question, conversation: turn.session) { answers in
                             turn.answer(question, answers: answers)
                         }
                     }

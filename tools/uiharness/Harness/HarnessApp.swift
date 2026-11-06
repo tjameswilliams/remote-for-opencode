@@ -70,7 +70,22 @@ struct HarnessView: View {
                     .init(type: "user", text: "The token refresh races when two requests 401 at once. Fix it."),
                     .init(type: "reasoning", id: "r", text: Content.reasoning),
                     .init(type: "tool", id: "t1", tool: "read", status: "completed"),
+                    .init(
+                        type: "tool", id: "s1", tool: "subagent", status: "completed",
+                        subagent: .init(
+                            session: "ses_child1", agent: "explore",
+                            description: "Find every caller of refreshToken"
+                        )
+                    ),
                     .init(type: "tool", id: "t2", tool: "edit", status: "completed"),
+                    .init(
+                        type: "tool", id: "s2", tool: "subagent", status: "completed",
+                        subagent: .init(
+                            session: "ses_child2", agent: "general",
+                            description: "Run the auth test suite and report failures",
+                            background: true
+                        )
+                    ),
                     .init(type: "text", id: "x", text: Content.answer),
                 ],
                 diffs: [.init(file: "Sources/Auth/TokenStore.swift", additions: 18, deletions: 6, status: "modified")],
@@ -80,7 +95,8 @@ struct HarnessView: View {
                 usage: .init(
                     input: 31_400, output: 2_800, cacheRead: 9_100,
                     cost: 0.34, contextLimit: 200_000
-                )
+                ),
+                project: "/Users/t/app"
             )
             composer
         }
@@ -110,7 +126,7 @@ struct HarnessView: View {
                     id: "p", permission: "bash",
                     patterns: ["rm -rf ./build && npm publish --access public"],
                     always: ["rm *"], risk: "high"
-                )) { _ in }
+                ).with(session: "ses_child2"), conversation: "ses_parent") { _ in }
                 .frame(height: 540)
                 .background(Color.canvas)
                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -239,4 +255,12 @@ private enum Content {
          }
      }
     """
+}
+
+private extension PermissionRequest {
+    func with(session: String) -> PermissionRequest {
+        var copy = self
+        copy.sessionID = session
+        return copy
+    }
 }

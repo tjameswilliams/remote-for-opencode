@@ -203,12 +203,21 @@ struct WorkspaceWindow: View {
             nil
         }
         if let target {
-            WorkspaceSessionView(
-                state: state,
-                project: target.project,
-                session: target.session,
-                title: target.title
-            )
+            // A stack inside the pane so a subagent's conversation opens on
+            // top of its parent with a Back button, while the sidebar keeps
+            // the parent selected (and persisted). The key below resets the
+            // stack along with the controller when the selection moves.
+            NavigationStack {
+                WorkspaceSessionView(
+                    state: state,
+                    project: target.project,
+                    session: target.session,
+                    title: target.title
+                )
+                .navigationDestination(for: SubagentRoute.self) { route in
+                    SubagentSessionView(route: route, makeLink: state.makeLink)
+                }
+            }
             // A fresh controller per conversation: the key is what stops
             // one session's in-flight turn from streaming into another's
             // pane. The state owns it so a fresh conversation can keep its

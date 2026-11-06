@@ -731,14 +731,18 @@ struct OpenCodeAdapter {
 
     func sessions(limit: Int = 20, search: String? = nil) async throws -> [Session] {
         if api == .v2 { return try await v2Sessions(limit: limit, search: search) }
-        var path = "/experimental/session?limit=\(limit)"
+        // Root sessions only, as on 2.x: a subagent's session belongs to
+        // its parent's thread, where its card opens it. `roots` is in 1.18;
+        // the parentID check covers a server that ignores it.
+        var path = "/experimental/session?limit=\(limit)&roots=true"
         if let search, !search.isEmpty,
            let encoded = search.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
             path += "&search=\(encoded)"
         }
         let list = try await get(path) as? [[String: Any]] ?? []
         return list.compactMap { item in
-            guard let id = item["id"] as? String else { return nil }
+            guard let id = item["id"] as? String, item["parentID"] as? String == nil
+            else { return nil }
             let time = item["time"] as? [String: Any]
             return Session(
                 id: id,
@@ -987,6 +991,69 @@ struct OpenCodeAdapter {
         }
     }
 
+    /// Fills in the child session of any subagent part that arrived
+    /// without one. A subagent still running when the history was read has
+    /// no id in its tool call yet (2.x only reports it live), so it's found
+    /// the way OpenCode's web app finds it: the newest child session whose
+    /// title starts with the task's description. One extra request, and
+    /// only when a part needs it; on any failure the parts come back as
+    /// they were.
+    func resolvingSubagents(
+        _ parts: [TurnPart], sessionID: String, directory: String
+    ) async -> [TurnPart] {
+        guard parts.contains(where: { $0.subagent != nil && $0.subagent?.session == nil }),
+              var children = try? await children(of: sessionID, directory: directory)
+        else { return parts }
+        let claimed = Set(parts.compactMap { $0.subagent?.session })
+        children.removeAll { claimed.contains($0.id) }
+        // Newest part claims the newest child, so a description repeated
+        // across two calls pairs up in order.
+        var resolved = parts
+        for index in resolved.indices.reversed() {
+            guard var ref = resolved[index].subagent, ref.session == nil,
+                  let description = ref.description, !description.isEmpty,
+                  let match = children.firstIndex(where: { $0.title?.hasPrefix(description) == true })
+            else { continue }
+            ref.session = children.remove(at: match).id
+            resolved[index].subagent = ref
+        }
+        return resolved
+    }
+
+    /// The session that started this one as a subagent: `.some(nil)` for
+    /// a root session. Throws when OpenCode can't say.
+    func parentID(of sessionID: String, directory: String) async throws -> String?? {
+        let info: [String: Any]
+        if api == .v2 {
+            info = try await v2Session(sessionID)
+        } else {
+            info = try await get("/session/\(sessionID)", directory: directory)
+                as? [String: Any] ?? [:]
+        }
+        guard info["id"] != nil else { return nil }
+        return .some(info["parentID"] as? String)
+    }
+
+    /// A session's subagent sessions, newest first.
+    func children(of sessionID: String, directory: String) async throws -> [(id: String, title: String?)] {
+        let list: [[String: Any]]
+        if api == .v2 {
+            list = try await v2Get(
+                "/api/session?limit=100&order=desc&parentID=\(Self.queryEncoded(sessionID))"
+            ) as? [[String: Any]] ?? []
+        } else {
+            list = try await get("/session/\(sessionID)/children", directory: directory)
+                as? [[String: Any]] ?? []
+        }
+        func created(_ item: [String: Any]) -> Double {
+            (item["time"] as? [String: Any])?["created"] as? Double ?? 0
+        }
+        return list.sorted { created($0) > created($1) }.compactMap { item in
+            guard let id = item["id"] as? String else { return nil }
+            return (id, item["title"] as? String)
+        }
+    }
+
     /// The context meter's starting point for a cold load: the last
     /// assistant step's token accounting, the same numbers
     /// `message.updated` streams live. Nil while the session has never
@@ -1218,6 +1285,32 @@ struct OpenCodeAdapter {
         return head[..<(head.lastIndex(of: "\n") ?? head.endIndex)] + "\n…"
     }
 
+    /// The subagent a tool call started, for the tool that starts them:
+    /// `task` on 1.x, `subagent` on 2.x. The child session's id is in the
+    /// call's metadata (`sessionId` on 1.x, `sessionID` on 2.x) once
+    /// OpenCode has created it; a continuation names it in the input.
+    static func subagentRef(
+        tool: String?, status: String?, input: [String: Any]?, metadata: [String: Any]?,
+        title: String?
+    ) -> SubagentRef? {
+        guard tool == "task" || tool == "subagent" else { return nil }
+        let session = metadata?["sessionID"] as? String
+            ?? metadata?["sessionId"] as? String
+            ?? input?["sessionID"] as? String
+        let description = (input?["description"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? title
+        // A background subagent's call completes while its session runs
+        // on; OpenCode's own clients badge it the same way.
+        let background = input?["background"] as? Bool == true
+            || (status == "completed" && metadata?["status"] as? String == "running")
+        return SubagentRef(
+            session: session,
+            agent: input?["agent"] as? String ?? input?["subagent_type"] as? String,
+            description: description,
+            background: background ? true : nil
+        )
+    }
+
     /// An OpenCode message part → the phone's TurnPart, or nil for part
     /// types the phone doesn't render.
     static func turnPart(from part: [String: Any], role: String) -> TurnPart? {
@@ -1242,20 +1335,32 @@ struct OpenCodeAdapter {
             // the code itself, the way OpenCode's own TUI previews it.
             let input = state?["input"] as? [String: Any]
             let code = input?["content"] as? String ?? input?["newString"] as? String
+            let tool = part["tool"] as? String
             return TurnPart(
                 type: "tool", id: id,
-                tool: part["tool"] as? String,
+                tool: tool,
                 status: state?["status"] as? String,
                 file: code == nil ? nil : input?["filePath"] as? String,
-                preview: code.map(cappedPreview)
+                preview: code.map(cappedPreview),
+                subagent: subagentRef(
+                    tool: tool, status: state?["status"] as? String, input: input,
+                    metadata: state?["metadata"] as? [String: Any],
+                    title: state?["title"] as? String
+                )
             )
         case "subtask":
             // A command with `subtask: true` (like /review) runs in a
-            // subagent, and its work arrives as this. Observed live —
+            // subagent, and its work arrives as this. Observed live:
             // without it, a subagent command looks like nothing happening.
+            // The part has no child id of its own; the task tool call that
+            // follows it carries one.
             return TurnPart(
                 type: "tool", id: id, tool: "subagent",
-                status: (part["state"] as? [String: Any])?["status"] as? String
+                status: (part["state"] as? [String: Any])?["status"] as? String,
+                subagent: SubagentRef(
+                    agent: part["agent"] as? String,
+                    description: part["description"] as? String
+                )
             )
         default:
             // step-start/step-finish/patch and future kinds: nothing the

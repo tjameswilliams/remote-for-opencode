@@ -13,6 +13,9 @@ struct PermissionCard: View {
     /// Asks waiting behind this one. Said out loud so "always" is chosen
     /// knowing it will cover the rest, and "once" knowing it will not.
     var queued = 0
+    /// The conversation on screen. An ask from any other session came from
+    /// one of its subagents, and says so.
+    var conversation: String? = nil
     /// reply, plus an optional message when the user redirects instead of
     /// simply refusing.
     let reply: (PermissionAnswer) -> Void
@@ -25,6 +28,7 @@ struct PermissionCard: View {
     @State private var redirection = ""
 
     private var risk: PermissionRequest.Risk { request.riskLevel }
+    private var fromSubagent: Bool { isSubagentAsk(request.sessionID, in: conversation) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -49,17 +53,22 @@ struct PermissionCard: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            Image(systemName: risk == .high ? "exclamationmark.triangle.fill" : "hand.raised.fill")
-                .foregroundStyle(risk == .high ? Color.caution : Color.inkMuted)
-            Text(title)
-                .font(.headline)
-                .foregroundStyle(Color.ink)
-            Spacer()
-            if queued > 0 {
-                Text("\(queued) more waiting")
-                    .font(.caption)
-                    .foregroundStyle(Color.inkMuted)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: risk == .high ? "exclamationmark.triangle.fill" : "hand.raised.fill")
+                    .foregroundStyle(risk == .high ? Color.caution : Color.inkMuted)
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(Color.ink)
+                Spacer()
+                if queued > 0 {
+                    Text("\(queued) more waiting")
+                        .font(.caption)
+                        .foregroundStyle(Color.inkMuted)
+                }
+            }
+            if fromSubagent {
+                SubagentAskNote()
             }
         }
     }
@@ -93,7 +102,7 @@ struct PermissionCard: View {
     @ViewBuilder
     private var scopeNote: some View {
         if let always = request.always, !always.isEmpty {
-            Text("“Always” allows \(always.joined(separator: ", ")) for the rest of this session.")
+            Text("“Always” allows \(always.joined(separator: ", ")) for the rest of \(fromSubagent ? "this subagent’s session" : "this session").")
                 .font(.footnote)
                 .foregroundStyle(Color.inkMuted)
         }

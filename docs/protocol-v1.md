@@ -65,8 +65,11 @@ have already observed.
   project instead and the stored pin goes quiet.
 
 ### `sessions`
-- `GET /experimental/session?limit=N` → cross-project, recency-sorted
+- `GET /experimental/session?limit=N&roots=true` → cross-project, recency-sorted
   `[{id, title, directory, ...}]`. Supports `search`, `cursor`, `archived`.
+  `roots=true` leaves out subagent sessions (verified 1.18.15; without it a
+  subagent's session listed as a thread of its own); the companion also
+  drops any item with a `parentID`. 2.x: `GET /api/session?parentID=null`.
 
 ### `prompt`
 - `POST /session?directory=…` body `{title?, agent?, model?, permission?: PermissionRule[]}`
@@ -294,6 +297,37 @@ request. Its rows are already `FileDiff`-shaped
   SSE feed if it drops (OpenCode restart) for as long as the connection
   lives. Clients reload the transcript when (re)starting a watch — parts
   dedupe by id, so overlap is safe and gaps are filled.
+
+### Subagents: child sessions
+- OpenCode runs each subagent in a **child session** (`parentID` = the
+  conversation that started it). The tool that starts one is `task` on
+  1.x and `subagent` on 2.x.
+- A tool `part` for it carries `subagent: {session?, agent?, description?,
+  background?}`. `session` is the child's id; clients open it with the
+  ordinary `transcript` and `watch` requests, passing the parent's
+  `project` (a child runs in its parent's directory). Older clients ignore
+  the field; a client talking to an older companion sees `tool: "task"`
+  with no `subagent` and shows the card without a link.
+- Where the id comes from: 1.x `state.metadata.sessionId`, set while the
+  call runs. 2.x `metadata.sessionID` on the ephemeral
+  `session.tool.progress` event (while running) and on
+  `session.tool.success` (at the end); a 2.x history read mid-run has
+  `metadata: {}`, so the `transcript` handler then lists the parent's
+  children (1.x `GET /session/{id}/children`, 2.x `GET
+  /api/session?parentID=<id>`) and pairs each part with the newest child
+  whose title starts with its description (1.x titles children
+  `"<description> (@<agent> subagent)"`, 2.x uses the description as is).
+- A turn or watch treats the whole family (the session, its subagents,
+  theirs) as one conversation for **asks and liveness only**: a
+  subagent's `permission` and `question` asks are relayed on the parent's
+  stream (the `PermissionRequest.sessionID` still names the child, so a
+  client can say "asked by a subagent"), and a subagent's events keep the
+  parent's stall watchdog quiet. Parts, todos, usage and `idle` stay the
+  session's own. Membership is learned from subagent parts and
+  `session.created` (`info.parentID`), and for a session first met through
+  an ask, by walking its parents (1.x `GET /session/{id}`, 2.x `GET
+  /api/session/{id}`). Verified on 2.1.4: a subagent's shell ask reached
+  the parent's watch and approving it let the subagent finish.
 
 ### `pending` (added for M3 push)
 - v1 request `{kind: "pending", project}` → one event
@@ -530,6 +564,7 @@ back into the 1.x shapes, so nothing past the adapter branches.
 | MCP add/remove | `POST /mcp` | `PUT /api/experimental/mcp/{name}` (runtime only) |
 | Sharing | share/unshare | removed (also gone in 1.19.1) |
 | Todos | `todo.updated` | the `todowrite` tool's input, behind `experimental.todo` |
+| Subagents | `task` tool, child id in `metadata.sessionId`; `GET /session/{id}/children` | `subagent` tool, child id in `metadata.sessionID` via `session.tool.progress`; `GET /api/session?parentID=<id>`; `session.created` carries `parentID` |
 
 The config file keeps working: 2.x normalizes 1.x-shaped `opencode.json`
 (`permission`, `mcp`, `provider`) on read.

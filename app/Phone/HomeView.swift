@@ -133,6 +133,11 @@ struct HomeView: View {
                     title: session.title ?? "Session"
                 )
             }
+            // A subagent card in any conversation opens the subagent's own,
+            // stacked on the one that started it so Back returns there.
+            .navigationDestination(for: SubagentRoute.self) { route in
+                SubagentSessionView(route: route)
+            }
             .overlay {
                 if loading, sessions.isEmpty, projects.isEmpty {
                     ProgressView("Reaching your Mac…")
