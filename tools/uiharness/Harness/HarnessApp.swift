@@ -25,6 +25,8 @@ struct HarnessView: View {
     @StateObject private var attachments = PromptAttachments()
     @StateObject private var dictation = Dictation()
     @State private var input = ""
+    @State private var draft = ""
+    @StateObject private var files = FileBrowser(project: "/Users/t/app", makeLink: { CompanionLink() })
 
     private var scene: Int { UserDefaults.standard.integer(forKey: "scene") }
 
@@ -48,6 +50,16 @@ struct HarnessView: View {
             mcp.mockForHarness()
             schedules.mockForHarness()
             mcpServers.mockForHarness()
+            files.mockForHarness(["": [
+                .init(path: ".github", name: ".github", directory: true),
+                .init(path: "Sources", name: "Sources", directory: true, status: "modified"),
+                .init(path: "Tests", name: "Tests", directory: true),
+                .init(path: "node_modules", name: "node_modules", directory: true, ignored: true),
+                .init(path: "Package.swift", name: "Package.swift", directory: false, size: 1204),
+                .init(path: "README.md", name: "README.md", directory: false, size: 4310, status: "modified"),
+                .init(path: "docs.pdf", name: "docs.pdf", directory: false, size: 482_000),
+                .init(path: "NOTES.md", name: "NOTES.md", directory: false, size: 210, status: "untracked"),
+            ]])
         }
     }
 
@@ -59,6 +71,16 @@ struct HarnessView: View {
         case 4: planning
         case 5: scheduled
         case 6: mcpServersScene
+        case 7: FolderScreen(browser: files, folder: "")
+        case 8: FileViewer(content: .init(path: "Sources/Auth/TokenStore.swift", size: 1840, text: Content.swiftFile))
+                    .navigationTitle("TokenStore.swift")
+        case 9: FileViewer(content: .init(path: "README.md", size: 1200, text: Content.readme))
+                    .navigationTitle("README.md")
+        case 10: FileViewer(content: .init(path: "Sources/Auth/TokenStore.swift", size: 1840, text: Content.swiftFile), line: 14)
+                    .navigationTitle("TokenStore.swift")
+        case 11: FileViewer(content: .init(path: "Sources/Auth/TokenStore.swift", size: 1840, text: Content.swiftFile), draft: $draft)
+                    .navigationTitle("TokenStore.swift")
+                    .onAppear { draft = Content.swiftFile }
         default: working
         }
     }
@@ -69,7 +91,7 @@ struct HarnessView: View {
                 rows: [
                     .init(type: "user", text: "The token refresh races when two requests 401 at once. Fix it."),
                     .init(type: "reasoning", id: "r", text: Content.reasoning),
-                    .init(type: "tool", id: "t1", tool: "read", status: "completed"),
+                    .init(type: "tool", id: "t1", tool: "read", status: "completed", file: "/Users/t/app/Sources/Auth/TokenStore.swift"),
                     .init(
                         type: "tool", id: "s1", tool: "subagent", status: "completed",
                         subagent: .init(
@@ -98,6 +120,8 @@ struct HarnessView: View {
                 ),
                 project: "/Users/t/app"
             )
+            .environment(\.openFile, OpenFileAction { _, _ in })
+            .environment(\.fileLinks, FileLinks(root: "/Users/t/app", paths: ["Sources/Auth/TokenStore.swift"]))
             composer
         }
     }
@@ -168,6 +192,55 @@ struct HarnessView: View {
 }
 
 private enum Content {
+    static let swiftFile = """
+    import Foundation
+
+    /// Hands out access tokens, refreshing at most once at a time.
+    actor TokenStore {
+        private var token: Token?
+        private var refreshing: Task<Token, Error>?
+        private let client: AuthClient
+
+        init(client: AuthClient) {
+            self.client = client
+        }
+
+        func current() async throws -> Token {
+            if let token, !token.isExpired { return token }
+            // Two callers that 401 together share one refresh.
+            if let refreshing { return try await refreshing.value }
+            let task = Task { try await client.refresh() }
+            refreshing = task
+            defer { refreshing = nil }
+            let fresh = try await task.value
+            token = fresh
+            return fresh
+        }
+    }
+    """
+
+    static let readme = """
+    # TokenStore
+
+    A small actor that hands out **access tokens** and refreshes them *once*, however many requests fail together.
+
+    ## Usage
+
+    ```swift
+    let store = TokenStore(client: client)
+    let token = try await store.current()
+    ```
+
+    - Concurrent callers share one refresh
+    - Expired tokens are never returned
+    - Errors propagate to every waiter
+
+    | Case | Refreshes |
+    | --- | --- |
+    | One 401 | 1 |
+    | Ten 401s at once | 1 |
+    """
+
     static let reasoning = """
     Two concurrent 401s both call refresh(), so the second overwrites the \
     first's token and one request ends up holding a token that was already \
@@ -176,7 +249,8 @@ private enum Content {
     """
 
     static let answer = """
-    Found it. `refresh()` had no guard against concurrent callers, so two \
+    Found it. `refresh()` in `TokenStore.swift` had no guard against \
+    concurrent callers (Sources/Auth/TokenStore.swift:14), so two \
     401s produced two refreshes and the loser kept a stale token.
 
     ```swift

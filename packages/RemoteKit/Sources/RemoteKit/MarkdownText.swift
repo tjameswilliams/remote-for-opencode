@@ -12,6 +12,8 @@ import SwiftUI
 /// light: no regex, single pass over lines.
 public struct MarkdownText: View {
     let text: String
+    /// Where set, file references become links (see FileLinks).
+    @Environment(\.fileLinks) private var fileLinks
 
     public init(text: String) { self.text = text }
 
@@ -34,12 +36,12 @@ public struct MarkdownText: View {
     private func view(for block: Block) -> some View {
         switch block {
         case let .paragraph(text):
-            Text(Self.inline(text))
+            Text(inline(text))
                 .lineSpacing(bodyLineSpacing)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         case let .heading(text, level):
-            Text(Self.inline(text))
+            Text(inline(text))
                 .font(level <= 1 ? .title3.bold() : level == 2 ? .headline : .subheadline.bold())
                 .textSelection(.enabled)
                 .padding(.top, headingTopPadding)
@@ -48,7 +50,7 @@ public struct MarkdownText: View {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(item.marker).foregroundStyle(.secondary)
-                        Text(Self.inline(item.text))
+                        Text(inline(item.text))
                             .lineSpacing(bodyLineSpacing)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
@@ -67,7 +69,7 @@ public struct MarkdownText: View {
                     ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
                         GridRow {
                             ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
-                                Text(Self.inline(cell))
+                                Text(inline(cell))
                                     .font(hasHeader && rowIndex == 0
                                         ? .subheadline.weight(.semibold) : .subheadline)
                                     .lineSpacing(bodyLineSpacing)
@@ -124,6 +126,11 @@ public struct MarkdownText: View {
         /// Rows of cells; `hasHeader` when a `|---|` separator followed the
         /// first row, which then renders bold.
         case table(rows: [[String]], hasHeader: Bool)
+    }
+
+    private func inline(_ s: String) -> AttributedString {
+        let parsed = Self.inline(s)
+        return fileLinks?.linked(parsed) ?? parsed
     }
 
     /// Inline markdown only. `.inlineOnlyPreservingWhitespace` keeps the

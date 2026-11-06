@@ -28,12 +28,27 @@ struct Transcript: View {
     var project: String?
 
     private static let indicatorID = "working"
+    @Environment(\.openFile) private var openFile
+    @Environment(\.fileLinks) private var fileLinks
     @ScaledMetric(relativeTo: .body) private var betweenParts: CGFloat = 12
     @ScaledMetric(relativeTo: .body) private var betweenTurns: CGFloat = 40
     @ScaledMetric(relativeTo: .body) private var gutter: CGFloat = 16
     @ScaledMetric(relativeTo: .body) private var userInset: CGFloat = 48
 
     var body: some View {
+        content
+            // File references in replies link to the file (MarkdownText,
+            // via FileLinks); everything else opens the way it always did.
+            .environment(\.openURL, OpenURLAction { url in
+                guard let openFile,
+                      let target = FileLinks.target(ofLink: url) ?? fileLinks?.target(of: url)
+                else { return .systemAction }
+                openFile(target.path, line: target.line)
+                return .handled
+            })
+    }
+
+    private var content: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -159,6 +174,7 @@ struct Transcript: View {
 /// the same job a `Section` header did, done with surface instead of lines.
 struct ChangeSummary: View {
     let diffs: [FileDiff]
+    @Environment(\.openFile) private var openFile
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -167,11 +183,26 @@ struct ChangeSummary: View {
                 .foregroundStyle(Color.inkMuted)
             ForEach(diffs, id: \.file) { diff in
                 HStack(spacing: 8) {
-                    Text(diff.file)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(Color.ink)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    if let openFile, diff.status != "deleted" {
+                        Button {
+                            openFile(diff.file)
+                        } label: {
+                            Text(diff.file)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(Color.ink)
+                                .underline(color: Color.inkFaint)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Opens the file")
+                    } else {
+                        Text(diff.file)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(Color.ink)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                     Spacer(minLength: 8)
                     Text("+\(diff.additions ?? 0)")
                         .foregroundStyle(Color.positive)
@@ -193,6 +224,7 @@ struct ChangeSummary: View {
 struct PartRow: View {
     let part: TurnPart
     var project: String?
+    @Environment(\.openFile) private var openFile
 
     var body: some View {
         switch part.type {
@@ -206,7 +238,20 @@ struct PartRow: View {
                 Label {
                     // A write/edit names its file — "edit · Transcript.swift"
                     // says what's happening; "edit" alone says almost nothing.
-                    Text(toolTitle)
+                    // Where files can be shown, the name opens the file.
+                    if let file = part.file, let openFile, let name = fileName {
+                        Button {
+                            openFile(file)
+                        } label: {
+                            Text("\(part.tool ?? "tool") · ")
+                                + Text(name).underline(color: Color.inkFaint)
+                        }
+                        .buttonStyle(.plain)
+                        .help(file)
+                        .accessibilityHint("Opens the file")
+                    } else {
+                        Text(toolTitle)
+                    }
                 } icon: {
                     switch part.status {
                     case "completed": Image(systemName: "checkmark.circle")
@@ -229,8 +274,12 @@ struct PartRow: View {
         }
     }
 
+    private var fileName: String? {
+        part.file?.split(separator: "/").last.map(String.init)
+    }
+
     private var toolTitle: String {
-        guard let file = part.file?.split(separator: "/").last else {
+        guard let file = fileName else {
             return part.tool ?? "tool"
         }
         return "\(part.tool ?? "tool") · \(file)"

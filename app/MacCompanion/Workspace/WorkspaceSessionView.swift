@@ -8,6 +8,9 @@ import SwiftUI
 /// waits.
 struct WorkspaceSessionView: View {
     @ObservedObject var state: WorkspaceState
+    /// The project's files: its index is what turns file names in the
+    /// agent's replies into links.
+    @ObservedObject var files: FileBrowser
     let title: String
 
     @StateObject private var turn: TurnController
@@ -23,6 +26,7 @@ struct WorkspaceSessionView: View {
 
     init(state: WorkspaceState, project: String, session: String?, title: String) {
         self.state = state
+        files = state.fileBrowser(for: project)
         self.title = title
         _turn = StateObject(wrappedValue: TurnController(
             project: project, session: session, makeLink: state.makeLink
@@ -99,6 +103,11 @@ struct WorkspaceSessionView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.canvas)
+        // File names on tool cards open in the inspector's Files tab.
+        .environment(\.openFile, OpenFileAction { [state, turn] path, line in
+            state.openFile(path, line: line, in: turn.project)
+        })
+        .environment(\.fileLinks, files.links)
         .navigationTitle(title)
         .inspector(isPresented: $state.inspectorShown) {
             InspectorPane(state: state, turn: turn, tab: $state.inspectorTab)
@@ -187,7 +196,10 @@ struct WorkspaceSessionView: View {
         .onChange(of: turn.running) {
             // A finished turn moved this conversation to the top of its
             // project on the Mac; the sidebar should agree without a ⌘R.
-            guard !turn.running, turn.session != nil else { return }
+            guard !turn.running else { return }
+            // Files the agent just created should link too.
+            Task { await files.reloadIndex() }
+            guard turn.session != nil else { return }
             Task { await state.loadSessions() }
         }
         .task {
@@ -199,6 +211,7 @@ struct WorkspaceSessionView: View {
             await turn.loadTranscript()
         }
         .task { await mcp.loadIfNeeded() }
+        .task { await files.loadIndexIfNeeded() }
     }
 
     private func send() {

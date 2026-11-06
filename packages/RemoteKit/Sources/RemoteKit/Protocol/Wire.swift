@@ -38,7 +38,8 @@ public enum Wire {
         /// "prompt" | "resume" | "abort" | "permission" | "question" |
         /// "pending" | "transcript" | "project.add" | "project.remove" |
         /// "watch" | "schedule.*" | "mcp.list" | "mcp.save" |
-        /// "mcp.remove" | "mcp.defaults" | "mcp.restart"
+        /// "mcp.remove" | "mcp.defaults" | "mcp.restart" | "files" |
+        /// "file" | "files.index" | "file.save"
         ///
         /// "watch" (session + project) is the one subscription: the Mac
         /// relays the session's live events — parts, todos, diffs,
@@ -122,6 +123,17 @@ public enum Wire {
         /// answers oldest first with no marker; a client that asks must
         /// cope with either order.
         public var newestFirst: Bool?
+        /// files: the folder to list; file: the file to read. Relative to
+        /// `project` (the root the explorer is confined to), "" for the
+        /// root itself. An absolute path inside the project also works,
+        /// which is how a tool card's file opens.
+        public var path: String?
+        /// file.save: the `version` of the file the edit started from; the
+        /// Mac refuses the save with `conflict` when the file has changed
+        /// since. The new contents travel in `text`.
+        public var version: String?
+        /// file.save: write even though the file changed since `version`.
+        public var force: Bool?
 
         public init(kind: String) { self.kind = kind }
     }
@@ -224,6 +236,20 @@ public enum Wire {
         public var newestFirst: Bool?
         /// On `transcript`: how many parts follow.
         public var count: Int?
+        /// On `files`: one folder's entries, sorted folders first.
+        public var entries: [FileEntry]?
+        /// On `files`: which folder `entries` lists.
+        public var path: String?
+        /// On `file`: what the explorer opened.
+        public var file: FileContent?
+        /// On `files.index`: every file in the project that isn't ignored,
+        /// project-relative, for quick open to rank on the client.
+        public var paths: [String]?
+        /// On `files.index`: the project held more files than were sent.
+        public var truncated: Bool?
+        /// On `failed`, answering `file.save`: the file changed on disk
+        /// since the edit began. Saving again with `force` overwrites it.
+        public var conflict: Bool?
         /// Never on the wire. Set by MacLink on failures it synthesises
         /// itself, so callers can tell "couldn't reach the Mac" from "the
         /// Mac said no".

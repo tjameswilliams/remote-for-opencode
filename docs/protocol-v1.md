@@ -271,6 +271,54 @@ request. Its rows are already `FileDiff`-shaped
   and MCP edits. Not capability-gated: `ready` carries no capabilities while
   OpenCode is down, and an older companion answers a readable `failed`.
 
+### `files` / `file` / `files.index`: the project file explorer
+
+Served by the companion from disk, not through OpenCode: OpenCode's `/file`
+endpoints differ between 1.x and 2.x, return text only, and are down while
+it restarts. Like `opencode.restart`, these answer while OpenCode is down.
+
+- `{kind: "files", project, path}` lists one folder (`path` relative to
+  `project`, `""` for the root) → one `files` event with `path` and
+  `entries: [FileEntry]`, folders first. `.git` and `.DS_Store` are left
+  out. Inside a git repository each entry carries `ignored` (from
+  `git check-ignore`) or `status` (`modified`, `added`, `deleted`,
+  `untracked`, `renamed`, `conflicted`, from `git status --porcelain`); a
+  folder gets `modified` when anything under it changed.
+- `{kind: "file", project, path}` reads one file → one `file` event with
+  `file: FileContent`. Text that decodes as UTF-8 arrives in `text`, cut to
+  its first 2 MB with `truncated: true` past that. Images and PDFs arrive as
+  bytes in `data` (base64 in JSON), up to 25 MB; past that, and for other
+  binary files, only `size` comes back. `path` may also be absolute inside
+  the project, which is how a tool card's `file` opens.
+- `{kind: "files.index", project}` → one `files.index` event with `paths`,
+  every file that isn't ignored (`git ls-files --cached --others
+  --exclude-standard`, or a walk that skips dependency and build folders
+  outside a repository), capped at 60,000 with `truncated: true`. Clients
+  rank it themselves for quick open (`FileSearch` in RemoteKit).
+- Every path is confined to `project`, symlinks resolved: anything that
+  lands outside answers `failed`. Git runs only where a `.git` exists above
+  the folder, since `/usr/bin/git` on a Mac without the developer tools
+  opens an install prompt.
+- `{kind: "file.save", project, path, text, version, force?}` writes an
+  edited text file back and answers with a fresh `file` event (new
+  `version`). `version` is the one the `file` event carried: a SHA-256 of
+  the bytes read, present only for whole UTF-8 files, which is what makes a
+  file editable in the clients. When the file on disk no longer matches it
+  (the agent wrote it meanwhile), the save is refused with
+  `{kind: "failed", conflict: true}`; resending with `force: true`
+  overwrites. Writes are atomic, keep the file's permissions, and are
+  refused inside `.git`, outside the project, or on a folder.
+- Not capability-gated: an older companion answers a readable `failed`.
+
+Clients also turn file references in the agent's replies into links,
+resolved against `files.index` (`FileLinks` in RemoteKit): a name or
+partial path links only when exactly one project file matches it, and a
+cited line (`Foo.swift:42`, `#L42`) opens the file scrolled to that line.
+
+Tool parts now carry `file` for every file tool (`read`, `write`, `edit`,
+`multiedit`, `patch`), not only the ones with a `preview`, so a client can
+open the file from the card.
+
 ### `watch` — live view of a session this client didn't prompt
 - `{kind: "watch", session, project}` subscribes to the session's live
   events, translated exactly like a prompt turn's (same event loop on the

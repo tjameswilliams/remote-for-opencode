@@ -21,6 +21,12 @@ struct SessionView: View {
     /// thread exposes is the thread's own property.
     @StateObject private var mcp: McpStore
     @State private var showingChanges = false
+    /// The Files sheet, and the file it opens onto when a tool card's name
+    /// was tapped.
+    @State private var files: FilesTarget?
+    /// The project's files: the Files sheet's tree, and the index that
+    /// turns file names in the agent's replies into links.
+    @StateObject private var fileBrowser: FileBrowser
     @StateObject private var attachments = PromptAttachments()
     /// What was typed before dictation started, so speech appends to it
     /// rather than eating it.
@@ -34,6 +40,9 @@ struct SessionView: View {
         self.title = title
         _turn = StateObject(wrappedValue: TurnController(project: project, session: session))
         _mcp = StateObject(wrappedValue: McpStore(project: project, session: session))
+        _fileBrowser = StateObject(wrappedValue: FileBrowser(
+            project: project, makeLink: { CompanionLink() }
+        ))
     }
 
     /// Commands to offer right now, or nil when the user isn't typing one.
@@ -78,14 +87,25 @@ struct SessionView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
+                Button { files = FilesTarget(file: nil, line: nil) } label: {
+                    Image(systemName: "folder")
+                }
+                .accessibilityLabel("Browse files")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 Button { showingChanges = true } label: {
                     Image(systemName: "arrow.triangle.branch")
                 }
                 .accessibilityLabel("Review changes")
             }
         }
+        .environment(\.openFile, OpenFileAction { path, line in files = FilesTarget(file: path, line: line) })
+        .environment(\.fileLinks, fileBrowser.links)
         .sheet(isPresented: $showingChanges) {
             ChangesView(project: turn.project)
+        }
+        .sheet(item: $files) { target in
+            FilesView(browser: fileBrowser, file: target.file, line: target.line)
         }
         .sheet(item: onTop ? $turn.permission : .constant(nil)) { request in
             PermissionSheet(request: request, queued: turn.queuedPermissions, conversation: turn.session) { answer in
@@ -115,6 +135,11 @@ struct SessionView: View {
         .task { await commands.loadIfNeeded() }
         .task { await agents.loadIfNeeded() }
         .task { await mcp.loadIfNeeded() }
+        .task { await fileBrowser.loadIndexIfNeeded() }
+        .onChange(of: turn.running) {
+            // Files the agent just created should link too.
+            if !turn.running { Task { await fileBrowser.reloadIndex() } }
+        }
         .animation(.easeOut(duration: 0.15), value: paletteMatches?.count)
         .onChange(of: scenePhase) {
             turn.active = scenePhase == .active
@@ -163,4 +188,11 @@ struct SessionView: View {
             mcp: mcp.wireMap
         )
     }
+}
+
+/// What the Files sheet opens onto: the project root, or one file.
+private struct FilesTarget: Identifiable {
+    let id = UUID()
+    let file: String?
+    let line: Int?
 }

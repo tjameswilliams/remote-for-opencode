@@ -84,6 +84,11 @@ struct WorkspaceWindow: View {
             state.inspectorTab = tab
             state.inspectorShown = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: WorkspaceCommand.openQuickly)) { _ in
+            state.inspectorTab = .files
+            state.inspectorShown = true
+            state.quickOpenRequested = true
+        }
         .onReceive(NotificationCenter.default.publisher(for: WorkspaceCommand.previousSession)) { _ in
             state.step(-1)
         }

@@ -14,6 +14,7 @@ enum WorkspaceCommand {
     static let previousSession = Notification.Name("workspace.previousSession")
     static let nextSession = Notification.Name("workspace.nextSession")
     static let refresh = Notification.Name("workspace.refresh")
+    static let openQuickly = Notification.Name("workspace.openQuickly")
 
     static func post(_ name: Notification.Name, tab: InspectorTab? = nil) {
         NotificationCenter.default.post(
@@ -40,6 +41,9 @@ struct WorkspaceCommands: Commands {
         CommandMenu("Session") {
             Button("Commands…") { WorkspaceCommand.post(WorkspaceCommand.palette) }
                 .keyboardShortcut("k", modifiers: .command)
+            // Xcode's name and chord for jumping to a file by name.
+            Button("Open Quickly…") { WorkspaceCommand.post(WorkspaceCommand.openQuickly) }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
             Divider()
             // Allow is deliberately chorded and explicit — and there is no
             // shortcut at all for "Always".
@@ -66,6 +70,8 @@ struct WorkspaceCommands: Commands {
                 .keyboardShortcut("2", modifiers: .command)
             Button("Approvals") { WorkspaceCommand.post(WorkspaceCommand.inspectorTab, tab: .approvals) }
                 .keyboardShortcut("3", modifiers: .command)
+            Button("Files") { WorkspaceCommand.post(WorkspaceCommand.inspectorTab, tab: .files) }
+                .keyboardShortcut("4", modifiers: .command)
             Divider()
             Button("Previous Session") { WorkspaceCommand.post(WorkspaceCommand.previousSession) }
                 .keyboardShortcut(.upArrow, modifiers: [.command, .control])

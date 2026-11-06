@@ -11,7 +11,7 @@ import SwiftUI
 /// palette-mapped theme isn't possible today — Highlightr only loads its
 /// bundled CSS — and gruvbox is close enough that nothing clashes. The
 /// theme's own background is ignored; the view draws the app's surface.
-enum CodeHighlighter {
+public enum CodeHighlighter {
     /// One serial queue for all highlighting: Highlightr instances are not
     /// thread-safe, and code previews are occasional, not a firehose.
     private static let queue = DispatchQueue(label: "code-highlight", qos: .userInitiated)
@@ -52,12 +52,134 @@ enum CodeHighlighter {
         }
     }
 
+    /// Past this, a whole file is shown plain: highlight.js runs in
+    /// JavaScriptCore and a megabyte of source would hold the queue for
+    /// seconds.
+    public static let fileLimit = 300_000
+
+    /// A whole file, highlighted, as the platform's attributed string at
+    /// `size` points, for a text view to show. Nil when the language is
+    /// unknown, the file is past `fileLimit`, or highlighting fails.
+    public static func highlightFile(
+        _ code: String, language: String?, dark: Bool, size: CGFloat
+    ) async -> NSAttributedString? {
+        guard let language, code.utf8.count <= fileLimit else { return nil }
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                guard let highlighted = engine(dark: dark)?
+                    .highlight(code, as: language, fastRender: true)
+                else { return continuation.resume(returning: nil) }
+                continuation.resume(returning: resized(highlighted, to: size))
+            }
+        }
+    }
+
+    /// The same, split into lines, for a lazily drawn list of rows.
+    public static func highlightLines(
+        _ code: String, language: String?, dark: Bool, size: CGFloat
+    ) async -> [AttributedString]? {
+        guard let whole = await highlightFile(code, language: language, dark: dark, size: size)
+        else { return nil }
+        return lines(of: whole)
+    }
+
+    /// One attributed string per line, without the line breaks.
+    static func lines(of whole: NSAttributedString) -> [AttributedString] {
+        let string = whole.string as NSString
+        var lines: [AttributedString] = []
+        var start = 0
+        while start <= string.length {
+            let rest = NSRange(location: start, length: string.length - start)
+            let newline = string.range(of: "\n", options: [], range: rest)
+            let end = newline.location == NSNotFound ? string.length : newline.location
+            lines.append(AttributedString(
+                whole.attributedSubstring(from: NSRange(location: start, length: end - start))
+            ))
+            if newline.location == NSNotFound { break }
+            start = end + 1
+        }
+        return lines
+    }
+
+    /// The engine's fonts rebuilt as the system monospaced face at
+    /// `size`, keeping bold and italic. Rebuilt rather than resized: the
+    /// theme's italic (comments) is derived in a way that lands on a
+    /// proportional face, and a comment out of the grid misaligns the code.
+    private static func resized(_ source: NSAttributedString, to size: CGFloat) -> NSAttributedString {
+        let copy = NSMutableAttributedString(attributedString: source)
+        let whole = NSRange(location: 0, length: copy.length)
+        var cache: [String: RPFont] = [:]
+        copy.enumerateAttribute(.font, in: whole) { value, range, _ in
+            guard let font = value as? RPFont else { return }
+            #if canImport(UIKit)
+            let traits = font.fontDescriptor.symbolicTraits
+            let bold = traits.contains(.traitBold)
+            let italic = traits.contains(.traitItalic)
+            #else
+            let traits = font.fontDescriptor.symbolicTraits
+            let bold = traits.contains(.bold)
+            let italic = traits.contains(.italic)
+                || font.fontName.lowercased().contains("italic")
+                || font.fontName.lowercased().contains("oblique")
+            #endif
+            let key = "\(bold)\(italic)"
+            if cache[key] == nil { cache[key] = monospaced(size: size, bold: bold, italic: italic) }
+            copy.addAttribute(.font, value: cache[key]!, range: range)
+        }
+        return copy
+    }
+
+    private static func monospaced(size: CGFloat, bold: Bool, italic: Bool) -> RPFont {
+        let base = RPFont.monospacedSystemFont(ofSize: size, weight: bold ? .semibold : .regular)
+        guard italic else { return base }
+        #if canImport(UIKit)
+        guard let descriptor = base.fontDescriptor.withSymbolicTraits(
+            base.fontDescriptor.symbolicTraits.union(.traitItalic)
+        ) else { return base }
+        return UIFont(descriptor: descriptor, size: size)
+        #else
+        let descriptor = base.fontDescriptor.withSymbolicTraits(
+            base.fontDescriptor.symbolicTraits.union(.italic)
+        )
+        return NSFont(descriptor: descriptor, size: size) ?? base
+        #endif
+    }
+
     /// highlight.js language for a file, from its extension. Nil means
     /// "don't guess": auto-detection is slow and wrong often enough that
     /// plain monospaced text is the better failure.
-    static func language(forFile path: String) -> String? {
+    public static func language(forFile path: String) -> String? {
+        let name = (path as NSString).lastPathComponent.lowercased()
+        switch name {
+        case "dockerfile": return "dockerfile"
+        case "makefile", "gnumakefile": return "makefile"
+        case "cmakelists.txt": return "cmake"
+        case "gemfile", "podfile", "rakefile", "fastfile", "appfile": return "ruby"
+        case ".zshrc", ".bashrc", ".bash_profile", ".zprofile", ".profile": return "bash"
+        case ".gitignore", ".gitattributes", ".env", ".editorconfig", ".npmrc": return "ini"
+        default: break
+        }
         let ext = (path as NSString).pathExtension.lowercased()
         switch ext {
+        case "lua": return "lua"
+        case "dart": return "dart"
+        case "scala", "sc": return "scala"
+        case "r": return "r"
+        case "pl", "pm": return "perl"
+        case "ex", "exs": return "elixir"
+        case "hs": return "haskell"
+        case "clj", "cljs", "edn": return "clojure"
+        case "erl": return "erlang"
+        case "gradle": return "gradle"
+        case "proto": return "protobuf"
+        case "less": return "less"
+        case "jsonc", "json5", "jsonl": return "json"
+        case "cfg", "conf", "env": return "ini"
+        case "mk": return "makefile"
+        case "tex": return "latex"
+        case "bat", "cmd": return "dos"
+        case "ps1": return "powershell"
+        case "fish": return "bash"
         case "swift": return "swift"
         case "ts", "tsx", "mts", "cts": return "typescript"
         case "js", "jsx", "mjs", "cjs": return "javascript"

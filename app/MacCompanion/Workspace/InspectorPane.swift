@@ -2,7 +2,7 @@ import RemoteKit
 import SwiftUI
 
 enum InspectorTab: String, CaseIterable, Identifiable {
-    case changes, plan, approvals
+    case changes, plan, approvals, files
     var id: String { rawValue }
 
     var label: String {
@@ -10,6 +10,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
         case .changes: return "Changes"
         case .plan: return "Plan"
         case .approvals: return "Approvals"
+        case .files: return "Files"
         }
     }
 }
@@ -40,6 +41,8 @@ struct InspectorPane: View {
                 planPane
             case .approvals:
                 approvalsPane
+            case .files:
+                FilesPane(state: state, browser: state.fileBrowser(for: turn.project), turn: turn)
             }
         }
         .background(Color.canvas)
@@ -142,6 +145,9 @@ struct ChangesPane: View {
                         fileRow(diff)
                             .tag(diff.file)
                             .contextMenu {
+                                Button("Open File") { state.openFile(diff.file, in: project) }
+                                    .disabled(diff.status == "deleted")
+                                Divider()
                                 Button(unifiedFiles.contains(diff.file)
                                     ? "Show Side by Side" : "Show Unified") {
                                     if !unifiedFiles.insert(diff.file).inserted {

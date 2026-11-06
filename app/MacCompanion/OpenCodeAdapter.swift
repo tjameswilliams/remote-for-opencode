@@ -1279,6 +1279,10 @@ struct OpenCodeAdapter {
     /// is a real one, not half of one.
     static let previewLimit = 16 << 10
 
+    /// Tools whose file argument names one file (`read` included, which
+    /// carries no preview but is worth opening from its card).
+    static let fileTools: Set<String> = ["read", "write", "edit", "multiedit", "patch"]
+
     private static func cappedPreview(_ code: String) -> String {
         guard code.count > previewLimit else { return code }
         let head = String(code.prefix(previewLimit))
@@ -1340,7 +1344,10 @@ struct OpenCodeAdapter {
                 type: "tool", id: id,
                 tool: tool,
                 status: state?["status"] as? String,
-                file: code == nil ? nil : input?["filePath"] as? String,
+                // Every file tool names its file, so a client can open it;
+                // grep and glob name a folder in the same argument on 2.x.
+                file: code != nil || Self.fileTools.contains(tool ?? "")
+                    ? input?["filePath"] as? String : nil,
                 preview: code.map(cappedPreview),
                 subagent: subagentRef(
                     tool: tool, status: state?["status"] as? String, input: input,

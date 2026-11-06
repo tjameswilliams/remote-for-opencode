@@ -16,6 +16,15 @@ struct ChangesView: View {
     @State private var loading = true
     @State private var error: String?
     @Environment(\.dismiss) private var dismiss
+    /// For "Open File" from a patch: the whole file, not just the hunks.
+    @StateObject private var browser: FileBrowser
+
+    init(project: String) {
+        self.project = project
+        _browser = StateObject(wrappedValue: FileBrowser(
+            project: project, makeLink: { CompanionLink() }
+        ))
+    }
 
     var body: some View {
         NavigationStack {
@@ -25,7 +34,7 @@ struct ChangesView: View {
                         Section {
                             ForEach(changes.files, id: \.file) { diff in
                                 NavigationLink {
-                                    PatchView(diff: diff)
+                                    PatchView(diff: diff, browser: browser)
                                 } label: {
                                     FileRow(diff: diff)
                                 }
@@ -141,6 +150,8 @@ private struct FileRow: View {
 /// 120 columns and a phone has roughly 42.
 struct PatchView: View {
     let diff: FileDiff
+    /// Set where the whole file can be opened from here.
+    var browser: FileBrowser?
 
     var body: some View {
         ScrollView([.vertical, .horizontal]) {
@@ -164,6 +175,18 @@ struct PatchView: View {
         .background(Color.canvas)
         .navigationTitle(diff.file.split(separator: "/").last.map(String.init) ?? diff.file)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if let browser, diff.status != "deleted" {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink {
+                        FileScreen(browser: browser, path: diff.file)
+                    } label: {
+                        Image(systemName: "doc.text")
+                    }
+                    .accessibilityLabel("Open file")
+                }
+            }
+        }
     }
 
     private var lines: [String] {

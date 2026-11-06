@@ -267,6 +267,12 @@ private final class Connection {
         // Restart is the way back from a crashed or wedged OpenCode, so it
         // can't sit behind the "is OpenCode up?" check below. The answer is
         // empty; the client re-asks once the server has had a moment.
+        // The file explorer reads the disk, not OpenCode, so it keeps
+        // working while OpenCode starts or restarts.
+        if ["files", "file", "files.index", "file.save"].contains(request.kind) {
+            serveFiles(request)
+            return
+        }
         if request.kind == "opencode.restart" {
             answer {
                 OpenCodeRestart.now()
@@ -471,6 +477,70 @@ private final class Connection {
         """
         write(e)
         write(Wire.Event(kind: "done"))
+    }
+
+    /// The file explorer: list a folder, read a file, index the project.
+    /// Disk and git work runs off the main actor; a large repository's
+    /// index takes long enough to be felt.
+    private func serveFiles(_ request: Wire.Request) {
+        guard let root = request.project else {
+            answer { [] }
+            return
+        }
+        let path = request.path ?? ""
+        switch request.kind {
+        case "files":
+            answer {
+                let (folder, entries) = try await Task.detached {
+                    try ProjectFileServer.list(root: root, path: path)
+                }.value
+                var e = Wire.Event(kind: "files")
+                e.path = folder
+                e.entries = entries
+                return [e]
+            }
+        case "file":
+            answer {
+                var e = Wire.Event(kind: "file")
+                e.file = try await Task.detached {
+                    try ProjectFileServer.read(root: root, path: path)
+                }.value
+                return [e]
+            }
+        case "file.save":
+            // Not through `answer`: a conflict is a failure the client
+            // acts on (offer to overwrite), so it carries a flag.
+            let text = request.text ?? ""
+            let expected = request.version
+            let force = request.force == true
+            Task { @MainActor in
+                do {
+                    var e = Wire.Event(kind: "file")
+                    e.file = try await Task.detached {
+                        try ProjectFileServer.save(
+                            root: root, path: path, text: text, expected: expected, force: force
+                        )
+                    }.value
+                    self.write(e)
+                } catch {
+                    var e = Wire.Event(kind: "failed")
+                    e.text = error.localizedDescription
+                    if case ProjectFileServer.Failure.conflict = error { e.conflict = true }
+                    self.write(e)
+                }
+                self.write(Wire.Event(kind: "done"))
+            }
+        default:
+            answer {
+                let (paths, truncated) = try await Task.detached {
+                    try ProjectFileServer.index(root: root)
+                }.value
+                var e = Wire.Event(kind: "files.index")
+                e.paths = paths
+                e.truncated = truncated ? true : nil
+                return [e]
+            }
+        }
     }
 
     /// The scheduled task requests. Same server-authoritative shape as the

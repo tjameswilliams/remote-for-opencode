@@ -56,6 +56,7 @@ final class WorkspaceState: ObservableObject {
         commands = CommandStore(makeLink: makeLink)
         schedules = ScheduleStore(makeLink: makeLink)
         mcpServers = McpRegistryStore(makeLink: makeLink)
+        fileBrowsers = [:]
         selection = nil
         sessions = []
         projects = []
@@ -162,6 +163,28 @@ final class WorkspaceState: ObservableObject {
     /// A slash command picked in the ⌘K palette, waiting for the composer
     /// to take it into the input field.
     @Published var pendingCommand: AgentCommand?
+    /// Open Quickly was asked for; the Files pane focuses its field and
+    /// clears this when it appears.
+    @Published var quickOpenRequested = false
+
+    /// One file explorer per project, kept across tab switches and
+    /// conversations so the tree comes back the way it was left.
+    private var fileBrowsers: [String: FileBrowser] = [:]
+
+    func fileBrowser(for project: String) -> FileBrowser {
+        if let browser = fileBrowsers[project] { return browser }
+        let browser = FileBrowser(project: project, makeLink: makeLink)
+        fileBrowsers[project] = browser
+        return browser
+    }
+
+    /// Show a project file in the inspector: from a tool card, a Changes
+    /// row, anywhere that names one.
+    func openFile(_ path: String, line: Int? = nil, in project: String) {
+        fileBrowser(for: project).open(path, line: line)
+        inspectorTab = .files
+        inspectorShown = true
+    }
 
     /// Per-window, per-peer stores, built over this window's link — not
     /// the phone's process-wide singletons.
