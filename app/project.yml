@@ -23,6 +23,9 @@ targets:
   MacCompanion:
     type: application
     platform: macOS
+    # A shared scheme, so every xcodegen run writes it. Left to Xcode's
+    # autocreation, a regenerated project can come up without it.
+    scheme: {}
     sources: [MacCompanion, Shared]
     dependencies:
       - package: RemoteKit
@@ -84,6 +87,7 @@ targets:
   Phone:
     type: application
     platform: iOS
+    scheme: {}
     sources: [Phone, Shared]
     # Required by App Store Connect since 2024: declares which
     # "required reason" APIs the app touches and that it collects nothing.
